@@ -42,8 +42,8 @@ constexpr uint8_t SCAN_TB_FLIP = 0x01;        // OR into the scan byte for mirro
 }  // namespace
 
 const Ssd1677Config& ssd1677DefaultConfig() {
-  // Xteink X4 / GDEQ0426T82 defaults. The stock X4 firmware's B/W update paths
-  // use absolute SSD1677 sequences rather than the incremental 0x1C assembly:
+  // Xteink X4 / GDEQ0426T82 defaults. The stock X4 paths and the X4 Pro 7.4.4
+  // SSD1677 firmware use absolute sequences rather than incremental 0x1C:
   // INIT:  0C=AE C7 C3 C0 80, 3C=80
   // FULL:  3C=C0, 22=F7, 20, ~1800 ms
   // HALF:  3C=C0, 1A=5A, 22=D7, 20
@@ -62,6 +62,9 @@ const Ssd1677Config& ssd1677DefaultConfig() {
       0xC0,  // borderWaveformFull: stock X4 border
       0xC0,  // borderWaveformFast: stock X4 border
       0xC0,  // borderWaveformHalf: stock X4 border
+      0xC0,  // borderWaveformGray: written explicitly with the external AA LUT (vendor
+             // reference stage 2); same value the B/W paths leave in the register, so
+             // the wire state is unchanged — just no longer relying on carry-over
   };
   return cfg;
 }
@@ -131,6 +134,21 @@ static const Ssd1677Config& ssd1677X4Config() {
 }
 #endif
 
+// Xteink X4 Pro with the fast-DU shortcut — OPT-IN via
+// -DFREEINK_X4PRO_FAST_DU_SHORTCUT. The X4 Pro paints on the stock X4 config
+// (same GDEQ0426T82 panel class — see ssd1677ActiveConfig), so the same
+// ~85 ms/refresh win applies, and so does the same panel-variance caveat: 0x1C
+// skips the per-refresh temperature load and power sequencing, and artifacts
+// tend to appear only over long sessions and across temperature. Enable only
+// after validating on your unit. SSD1677-batch units only — UC8179/UC8279
+// batches select a different driver and never reach this config.
+#ifdef FREEINK_X4PRO_FAST_DU_SHORTCUT
+static const Ssd1677Config& ssd1677X4ProConfig() {
+  static const Ssd1677Config cfg = fastDuRefreshShortcut(ssd1677DefaultConfig());
+  return cfg;
+}
+#endif
+
 Ssd1677Driver::Ssd1677Driver(const Ssd1677Config& cfg)
     : _cfg(cfg),
       _w(BoardConfig::ACTIVE.displayWidth),
@@ -159,6 +177,10 @@ void Ssd1677Driver::initController(EpdBus& bus) {
   constexpr uint8_t TEMP_SENSOR_INTERNAL = 0x80;
 
   bus.cmd(CMD_SOFT_RESET);
+  // The X4 Pro production sequence requires a fixed 10 ms settle after
+  // SWRESET. Active-high BUSY may not have asserted by the first GPIO sample,
+  // so waitBusy() alone is not a substitute for this delay.
+  delay(10);
   bus.waitBusy(" CMD_SOFT_RESET");
 
   bus.cmd(CMD_TEMP_SENSOR_CONTROL);
@@ -241,6 +263,7 @@ void Ssd1677Driver::writeRam(EpdBus& bus, uint8_t ramCmd, const uint8_t* data, u
 }
 
 void Ssd1677Driver::refresh(EpdBus& bus, RefreshMode mode, bool turnOff, bool async) {
+  _pendingPowerOff = false;
 #if defined(SSD1677_PROBE_DEBUG) && SSD1677_PROBE_DEBUG
   const uint32_t dbgStart = millis();
   const char* dbgMode = (mode == RefreshMode::Full) ? "FULL" : (mode == RefreshMode::Half) ? "HALF" : "FAST";
@@ -278,14 +301,17 @@ void Ssd1677Driver::refresh(EpdBus& bus, RefreshMode mode, bool turnOff, bool as
     bus.data(seqOverride);
     bus.cmd(CMD_MASTER_ACTIVATION);
     if (!async) bus.waitRefreshComplete("refresh");
-    // The sequence powered the panel down at the end, but keep the flag truthful
-    // to intent: leave it "on" between active updates so display() doesn't force a
-    // full HALF refresh next time (which would defeat fast refresh). turnOff marks
-    // it off for the sleep path. The vendor sequences self-cycle power: if they
-    // include the disable bits (0x03) the panel is OFF afterward — track that so the
-    // next refresh (e.g. the custom-LUT grayscale path) powers it back on instead of
-    // issuing a display command against a powered-down panel (which hangs BUSY).
-    _isScreenOn = (seqOverride & 0x03) ? false : !turnOff;
+    // Only sequences carrying the low two disable bits physically power down.
+    // X4 Pro DU (0xFC) does not, so a turnOff request must run the documented
+    // 0x3C=0x80, 0x22=0x03, 0x20 sequence after the waveform completes instead
+    // of merely changing the software flag.
+    const bool sequencePowersOff = (seqOverride & 0x03) != 0;
+    _isScreenOn = !sequencePowersOff;
+    if (turnOff && !sequencePowersOff) {
+      // Defer until displayImpl/displayWindow has completed any post-refresh RAM
+      // rewire. Async updates consume the same flag in displayFinish().
+      _pendingPowerOff = true;
+    }
 #if defined(SSD1677_PROBE_DEBUG) && SSD1677_PROBE_DEBUG
     esp_rom_printf("[SSD1677] %s refresh %ums (ctrl2=0x%x, seq)\n", dbgMode, (unsigned)(millis() - dbgStart),
                    seqOverride);
@@ -309,8 +335,18 @@ void Ssd1677Driver::refresh(EpdBus& bus, RefreshMode mode, bool turnOff, bool as
     bus.cmd(CMD_WRITE_TEMP);
     bus.data(_cfg.halfRefreshTemp);
     displayMode |= 0xD4;
+  } else if (_customLutActive) {
+    // External-LUT (AA grayscale) activation is the absolute 0xCC sequence per the
+    // vendor reference — clock/analog enable + display, WITHOUT the OTP LUT reload
+    // (0x10 bit clear). The enable bits are a no-op when the rails are already up
+    // (the usual X4 case, where stage 1 left them on), and required when they are
+    // not, so 0xCC is correct in both states. The production driver marks power OFF
+    // after this pass; mirror that so the next refresh re-enables the rails.
+    displayMode = 0xCC;
+    if (turnOff) displayMode |= 0x03;
+    _isScreenOn = false;
   } else {  // Fast
-    displayMode |= _customLutActive ? 0x0C : 0x1C;
+    displayMode |= 0x1C;
   }
 
   bus.cmd(CMD_DISPLAY_UPDATE_CTRL2);
@@ -332,6 +368,20 @@ void Ssd1677Driver::powerOn(EpdBus& bus) {
   _isScreenOn = true;
 }
 
+void Ssd1677Driver::powerOffController(EpdBus& bus) {
+  if (!_isScreenOn) return;
+  bus.cmd(CMD_BORDER_WAVEFORM);
+  bus.data(_cfg.borderWaveformInit);  // X4 Pro: 0x80
+  bus.cmd(CMD_DISPLAY_UPDATE_CTRL2);
+  bus.data(0x03);  // ANALOG_OFF_PHASE | CLOCK_OFF
+  bus.cmd(CMD_MASTER_ACTIVATION);
+  // Production X4 Pro power-off time. If BUSY remains asserted after the fixed
+  // interval, wait out the remainder before changing the state flag.
+  delay(200);
+  bus.waitBusy(" display power-down");
+  _isScreenOn = false;
+}
+
 void Ssd1677Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
   displayImpl(bus, fb, prev, mode, turnOff, /*async=*/false);
 }
@@ -349,6 +399,10 @@ bool Ssd1677Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* 
 void Ssd1677Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   (void)fb;  // X4 post-waveform needs nothing from the host frame
   bus.waitRefreshComplete("refresh");
+  if (_pendingPowerOff) {
+    _pendingPowerOff = false;
+    powerOffController(bus);
+  }
 }
 
 void Ssd1677Driver::displayImpl(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff,
@@ -400,9 +454,9 @@ void Ssd1677Driver::displayImpl(EpdBus& bus, const uint8_t* fb, const uint8_t* p
     writeRam(bus, CMD_WRITE_RAM_RED, fb, _bufferSize);
   } else {
     writeRam(bus, CMD_WRITE_RAM_BW, fb, _bufferSize);
-    // Dual-buffer: RED holds the previous frame for the differential compare.
-    // Single-buffer (prev == nullptr): RED already holds it from last refresh.
     if (prev != nullptr) {
+      // Dual-buffer: RED holds the previous frame for the differential compare.
+      // Single-buffer (prev == nullptr): RED already holds it from last refresh.
       writeRam(bus, CMD_WRITE_RAM_RED, prev, _bufferSize);
     }
   }
@@ -418,6 +472,10 @@ void Ssd1677Driver::displayImpl(EpdBus& bus, const uint8_t* fb, const uint8_t* p
     setRamArea(bus, 0, 0, _w, _h);
     writeRam(bus, CMD_WRITE_RAM_BW, fb, _bufferSize);
     writeRam(bus, CMD_WRITE_RAM_RED, fb, _bufferSize);
+  }
+  if (!async && _pendingPowerOff) {
+    _pendingPowerOff = false;
+    powerOffController(bus);
   }
 }
 
@@ -467,6 +525,10 @@ void Ssd1677Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t*
     setRamArea(bus, x, y, w, h);
     writeRam(bus, CMD_WRITE_RAM_BW, windowBuffer.data(), windowBufferSize);
     writeRam(bus, CMD_WRITE_RAM_RED, windowBuffer.data(), windowBufferSize);
+  }
+  if (_pendingPowerOff) {
+    _pendingPowerOff = false;
+    powerOffController(bus);
   }
 }
 
@@ -528,7 +590,8 @@ void Ssd1677Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, co
     _isScreenOn = false;  // 0xC7 always powers down after the update
   } else {
     // Settled rails before the gray waveform (no-op where the panel is already
-    // on, i.e. the X4's fast path). refresh() then sends 0x0C, not 0xCC.
+    // on, i.e. the X4's fast path). refresh() then runs the 0xCC external-LUT
+    // sequence (its enable bits are a no-op on already-up rails).
     if (_cfg.grayPowerUpFirst) powerOn(bus);
     refresh(bus, RefreshMode::Fast, turnOff);
   }
@@ -586,15 +649,7 @@ void Ssd1677Driver::deepSleep(EpdBus& bus) {
   // Stock parity (_powerOff): park the border at its init value so it is not left
   // driven with the full-refresh waveform through deep sleep, then power down
   // analog/clock. Stock does not touch CTRL1 here.
-  if (_isScreenOn) {
-    bus.cmd(CMD_BORDER_WAVEFORM);
-    bus.data(_cfg.borderWaveformInit);
-    bus.cmd(CMD_DISPLAY_UPDATE_CTRL2);
-    bus.data(0x03);  // ANALOG_OFF_PHASE | CLOCK_OFF
-    bus.cmd(CMD_MASTER_ACTIVATION);
-    bus.waitBusy(" display power-down");
-    _isScreenOn = false;
-  }
+  powerOffController(bus);
   // Stock parity: deep sleep mode 2 (0x03) discards controller RAM. Nothing may
   // treat RAM as a valid diff baseline after wake — initController() re-arms
   // _needsInitialFull, so the first paint is an absolute clean anyway.
@@ -619,7 +674,12 @@ static const Ssd1677Config& ssd1677ActiveConfig() {
     case BoardConfig::Board::Sticky: return ssd1677StickyConfig();
     // X4 Pro runs on the stock X4/GDEQ0426T82 config — same controller and panel
     // class, confirmed painting on hardware. No custom LUT or drive voltages needed.
+    // Layers the fast-DU shortcut only when the build opts in (ssd1677X4ProConfig).
+#ifdef FREEINK_X4PRO_FAST_DU_SHORTCUT
+    case BoardConfig::Board::XteinkX4Pro: return ssd1677X4ProConfig();
+#else
     case BoardConfig::Board::XteinkX4Pro: return ssd1677DefaultConfig();
+#endif
     // X4 layers the fast-DU shortcut on the default only when the build has
     // opted in (see ssd1677X4Config); stock 0xFC parity otherwise.
 #ifdef FREEINK_X4_FAST_DU_SHORTCUT

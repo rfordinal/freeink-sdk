@@ -32,6 +32,12 @@
 #if FREEINK_DRIVER_UC8179
 #include "driver/Uc8179Driver.h"
 #endif
+#if FREEINK_DRIVER_UC8279_X4
+#include "driver/Uc8279X4Driver.h"
+#endif
+#if FREEINK_DRIVER_UC8279C
+#include "driver/Uc8279cA4Driver.h"
+#endif
 #if FREEINK_DRIVER_ED2208
 #include "driver/Ed2208M5Driver.h"
 #endif
@@ -46,6 +52,9 @@
 #endif
 #if FREEINK_DRIVER_IT8951
 #include "driver/It8951Driver.h"
+#endif
+#if FREEINK_DRIVER_PAPER_MONO
+#include "driver/PaperMonoDriver.h"
 #endif
 
 namespace freeink {
@@ -134,17 +143,30 @@ void FreeInkDisplay::selectDriver() {
     case PanelSel::X4:
     default:
 #if FREEINK_DRIVER_UC8179
-      // Newer X4 / X4 Pro batches swap the SSD1677 for an UltraChip UC8179.
+      // Newer X4 / X4 Pro batches swap the SSD1677 for an UltraChip part.
       // Which silicon a unit carries is decided before begin() by the boot-time
-      // controller resolution (OEM hw_calib/screenType, then a bus probe), which
-      // sets ACTIVE.displayController.
+      // display-bus probe (probe-only; NVS hw_calib/screenType is diagnostics),
+      // which sets ACTIVE.displayController (and, for the UC8279 800x480
+      // variant, ACTIVE.displayControllerVariant from the VER LUT_VER byte).
       if (BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::UC8179) {
         _driver = &uc8179Driver();
         break;
       }
 #endif
-#if FREEINK_DRIVER_SSD1677
+#if FREEINK_DRIVER_UC8279_X4
+      // UC8279 (800x480) — the second UltraChip variant of this panel. Distinct
+      // from the X3's UC8279d driver, which routes via PanelSel::X3 above.
+      if (BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::UC8279) {
+        _driver = &uc8279X4Driver();
+        break;
+      }
+#endif
+#if FREEINK_DRIVER_UC8279C
+      _driver = &uc8279cA4Driver();
+#elif FREEINK_DRIVER_SSD1677
       _driver = &ssd1677Driver();
+#elif FREEINK_DRIVER_PAPER_MONO
+      _driver = &paperMonoDriver();
 #elif FREEINK_DRIVER_UC8253_MURPHY
       _driver = &uc8253MurphyDriver();
 #elif FREEINK_DRIVER_M5_OFFICIAL
@@ -160,6 +182,9 @@ void FreeInkDisplay::selectDriver() {
 #endif
       break;
   }
+  // A driver chosen after setInverted() (begin(), setDisplayX3()) must still
+  // learn the standing content polarity.
+  if (_driver) _driver->setBackgroundHint(_inverted);
 }
 
 void FreeInkDisplay::begin() {
@@ -210,38 +235,85 @@ void FreeInkDisplay::begin() {
 
 void FreeInkDisplay::clearScreen(uint8_t color) const { memset(frameBuffer, color, bufferSize); }
 
-void FreeInkDisplay::drawImage(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
-                               bool fromProgmem) const {
+// Blit a 1bpp image (MSB-first, 1=white/0=black) into the framebuffer.
+// `transparent` = only paint black pixels (AND, leaving white untouched);
+// otherwise overwrite the region. The byte-aligned case (x%8==0) keeps the
+// original whole-byte copy; a non-byte-aligned x uses a per-pixel path so the
+// image lands at the exact column instead of snapping to the nearest byte
+// (e.g. a logo centered at x=180 no longer shifts to 176). Source row stride is
+// ceil(w/8), so non-multiple-of-8 widths are handled too.
+void FreeInkDisplay::blitImage(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                               bool fromProgmem, bool transparent) const {
   if (!frameBuffer) return;
-  const uint16_t imageWidthBytes = w / 8;
+  const uint16_t imageWidthBytes = (w + 7) / 8;
+
+  if ((x & 7) == 0) {
+    // Byte-aligned fast path (unchanged behavior).
+    const uint16_t xByte = x / 8;
+    for (uint16_t row = 0; row < h; row++) {
+      const uint16_t destY = y + row;
+      if (destY >= displayHeight) break;
+      const uint32_t destOffset = static_cast<uint32_t>(destY) * displayWidthBytes + xByte;
+      const uint32_t srcOffset = static_cast<uint32_t>(row) * imageWidthBytes;
+      for (uint16_t col = 0; col < imageWidthBytes; col++) {
+        if ((xByte + col) >= displayWidthBytes) break;
+        const uint8_t srcByte = fromProgmem ? pgm_read_byte(&imageData[srcOffset + col]) : imageData[srcOffset + col];
+        uint8_t& destByte = frameBuffer[destOffset + col];
+        const bool isPartialFinalByte = col + 1 == imageWidthBytes && (w & 7) != 0;
+        if (!isPartialFinalByte) {
+          if (transparent)
+            destByte &= srcByte;  // only black pixels are drawn
+          else
+            destByte = srcByte;
+          continue;
+        }
+
+        // Only the high `w % 8` bits belong to the image. Preserve the
+        // destination pixels represented by padding bits in its final byte.
+        const uint8_t validMask = static_cast<uint8_t>(0xFFU << (8U - (w & 7)));
+        if (transparent)
+          destByte &= static_cast<uint8_t>(srcByte | static_cast<uint8_t>(~validMask));
+        else
+          destByte = static_cast<uint8_t>((destByte & static_cast<uint8_t>(~validMask)) | (srcByte & validMask));
+      }
+    }
+    return;
+  }
+
+  // Non-byte-aligned: per-pixel placement.
   for (uint16_t row = 0; row < h; row++) {
     const uint16_t destY = y + row;
     if (destY >= displayHeight) break;
-    const uint32_t destOffset = static_cast<uint32_t>(destY) * displayWidthBytes + (x / 8);
-    const uint32_t srcOffset = static_cast<uint32_t>(row) * imageWidthBytes;
-    for (uint16_t col = 0; col < imageWidthBytes; col++) {
-      if ((x / 8 + col) >= displayWidthBytes) break;
-      frameBuffer[destOffset + col] =
-          fromProgmem ? pgm_read_byte(&imageData[srcOffset + col]) : imageData[srcOffset + col];
+    const uint32_t srcRow = static_cast<uint32_t>(row) * imageWidthBytes;
+    const uint32_t destRow = static_cast<uint32_t>(destY) * displayWidthBytes;
+    for (uint16_t col = 0; col < w; col++) {
+      const uint16_t destX = x + col;
+      if (destX >= displayWidth) break;
+      const uint8_t srcByte =
+          fromProgmem ? pgm_read_byte(&imageData[srcRow + (col >> 3)]) : imageData[srcRow + (col >> 3)];
+      const bool white = (srcByte >> (7 - (col & 7))) & 1;  // 1 = white, 0 = black
+      const uint8_t mask = static_cast<uint8_t>(0x80 >> (destX & 7));
+      uint8_t& cell = frameBuffer[destRow + (destX >> 3)];
+      if (transparent) {
+        if (!white) cell &= static_cast<uint8_t>(~mask);  // paint black only
+      } else {
+        if (white)
+          cell |= mask;
+        else
+          cell &= static_cast<uint8_t>(~mask);
+      }
     }
   }
 }
 
+void FreeInkDisplay::drawImage(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                               bool fromProgmem) const {
+  blitImage(imageData, x, y, w, h, fromProgmem, /*transparent=*/false);
+}
+
 void FreeInkDisplay::drawImageTransparent(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                                           bool fromProgmem) const {
-  if (!frameBuffer) return;
-  const uint16_t imageWidthBytes = w / 8;
-  for (uint16_t row = 0; row < h; row++) {
-    const uint16_t destY = y + row;
-    if (destY >= displayHeight) break;
-    const uint32_t destOffset = static_cast<uint32_t>(destY) * displayWidthBytes + (x / 8);
-    const uint32_t srcOffset = static_cast<uint32_t>(row) * imageWidthBytes;
-    for (uint16_t col = 0; col < imageWidthBytes; col++) {
-      if ((x / 8 + col) >= displayWidthBytes) break;
-      const uint8_t srcByte = fromProgmem ? pgm_read_byte(&imageData[srcOffset + col]) : imageData[srcOffset + col];
-      frameBuffer[destOffset + col] &= srcByte;  // only black pixels are drawn
-    }
-  }
+  blitImage(imageData, x, y, w, h, fromProgmem, /*transparent=*/true);
 }
 
 void FreeInkDisplay::setFramebuffer(const uint8_t* bwBuffer) const { memcpy(frameBuffer, bwBuffer, bufferSize); }
@@ -253,6 +325,7 @@ void FreeInkDisplay::setInverted(const bool inverted) {
   _inversionDirty = true;
   _shadowValid = false;
   _redRamSynced = false;
+  if (_driver) _driver->setBackgroundHint(inverted);
 }
 
 bool FreeInkDisplay::toggleInverted() {
@@ -715,6 +788,14 @@ void FreeInkDisplay::displayGrayBuffer(bool turnOffScreen, const unsigned char* 
   _driver->displayGray(_bus, frameBuffer, turnOffScreen, lut, factoryMode);
 }
 
+void FreeInkDisplay::displayGrayCalibration(uint16_t customX, uint16_t customY, uint16_t customW, uint16_t customH) {
+  if (_inverted) return;
+  syncPendingAsync();
+  _shadowValid = false;
+  _redRamSynced = false;
+  _driver->displayGrayCalibration(_bus, frameBuffer, customX, customY, customW, customH);
+}
+
 void FreeInkDisplay::refreshDisplay(RefreshMode mode, bool turnOffScreen) { displayBuffer(mode, turnOffScreen); }
 
 void FreeInkDisplay::copyGrayscaleBuffers(const uint8_t* lsbBuffer, const uint8_t* msbBuffer) {
@@ -761,14 +842,29 @@ void FreeInkDisplay::copyGrayscaleMsbBuffers(const uint8_t* msbBuffer) {
 void FreeInkDisplay::writeGrayscalePlaneStrip(GrayPlane plane, const uint8_t* rows, uint16_t yStart,
                                               uint16_t numRows) {
   if (_inverted) return;
-  syncPendingAsync();  // no-op in the reader flow (it waits first); guards misuse
+  // Paper Mono retains these bytes in PSRAM and performs no bus access here, so
+  // staging can overlap the B/W waveform. Other drivers may write controller
+  // RAM and must drain the pending refresh first.
+  if (!_driver->supportsBusyGrayscaleStaging()) syncPendingAsync();
   _driver->writeGrayscalePlaneStrip(_bus, plane == GRAY_PLANE_LSB ? freeink::GrayPlane::Lsb : freeink::GrayPlane::Msb,
                                     rows, yStart, numRows);
+}
+
+bool FreeInkDisplay::supportsBusyGrayscaleStaging() const {
+  return !_inverted && _driver && _driver->supportsBusyGrayscaleStaging();
+}
+
+void FreeInkDisplay::prepareGrayscaleTarget() {
+  if (!_inverted && _driver && _driver->supportsBusyGrayscaleStaging()) {
+    _driver->prepareGrayscaleTarget(frameBuffer);
+  }
 }
 
 bool FreeInkDisplay::supportsStripGrayscale() const {
   return !_inverted && _driver && _driver->supportsStripGrayscale();
 }
+
+bool FreeInkDisplay::combinesGrayscaleBase() const { return _driver && _driver->combinesGrayscaleBase(); }
 
 void FreeInkDisplay::cleanupGrayscaleBuffers(const uint8_t* bwBuffer) {
   syncPendingAsync();
@@ -799,8 +895,48 @@ void FreeInkDisplay::skipInitialResync() {
   if (_driver) _driver->skipInitialResync();
 }
 
+void FreeInkDisplay::beginDisplayWork() {
+  if (_driver) _driver->beginDisplayWork();
+}
+
+void FreeInkDisplay::abortPostRefresh() {
+  if (_driver) _driver->abortPostRefresh();
+}
+
+bool FreeInkDisplay::postRefreshAborted() const {
+  return _driver && _driver->postRefreshAborted();
+}
+
+bool FreeInkDisplay::displayCommitted() const {
+  return !_driver || _driver->displayCommitted();
+}
+
+void FreeInkDisplay::runMaintenance() {
+  if (!_driver) return;
+  syncPendingAsync();
+  _driver->runMaintenance(_bus);
+}
+
+bool FreeInkDisplay::hasPendingMaintenance() const {
+  return _driver && _driver->hasPendingMaintenance();
+}
+
+void FreeInkDisplay::controllerIdle() {
+  if (!_driver) return;
+  syncPendingAsync();
+  _driver->controllerIdle(_bus);
+}
+
 void FreeInkDisplay::requestCompleteWaveformNextRefresh() {
   if (_driver) _driver->requestCompleteWaveformNextRefresh();
+}
+
+void FreeInkDisplay::setFullRefreshCompletesWaveform(bool enabled) {
+  if (_driver) _driver->setFullRefreshCompletesWaveform(enabled);
+}
+
+void FreeInkDisplay::setAccentPlaneSlot(uint8_t slot, const uint8_t* plane, uint8_t colorCode) {
+  if (_driver) _driver->setAccentPlaneSlot(slot, plane, colorCode);
 }
 
 void FreeInkDisplay::setFastRefreshCutoffMs(uint16_t ms) {
@@ -809,6 +945,10 @@ void FreeInkDisplay::setFastRefreshCutoffMs(uint16_t ms) {
 
 uint16_t FreeInkDisplay::fastRefreshCutoffMs() const {
   return _driver ? _driver->fastRefreshCutoffMs() : 0;
+}
+
+void FreeInkDisplay::setHoldPeriodicFullRefresh(bool hold) {
+  if (_driver) _driver->setHoldPeriodicFull(hold);
 }
 
 void FreeInkDisplay::grayscaleRevert() {

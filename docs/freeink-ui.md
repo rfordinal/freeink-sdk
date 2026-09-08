@@ -208,6 +208,9 @@ It manages a remaining content rectangle from `safeRect()`:
 - `status(props)` consumes the top status band
 - `footer(actions, count)` consumes the bottom footer band
 - `footer(props)` accepts `FooterProps` for nav spacing and button border edges
+- `setContentMargin(insets)` reserves space relative to the device safe area;
+  `setContentMarginFromScreen(insets)` reserves physical screen-edge chrome
+  without applying the safe-area insets twice
 - `button(label, action, value, state)` adds one full-width row button
 - `list(items, count, selected, action, topIndex)` fills the remaining body
 - `list(props)` uses a full `ListProps` when you need detailed styling
@@ -585,6 +588,14 @@ tied to any application's screen structure:
 - `button`
 - `checkbox`
 - `slider`
+- `capsuleSlider` (finger-height filled-capsule slider with an edge-riding
+  handle; touch-drag routed)
+- `sliderRow` (caption + value readout over `[-]` capsule `[+]`, with an
+  optional trailing icon toggle)
+- `tileGrid` (quick-setting tile cards in fixed columns; checked tiles fill
+  solid)
+- `sheet` (partial-height sheet chrome: card body, edge rule, grabber, and an
+  optional tap-outside dismiss action)
 - `gestureBar`
 - `header`
 - `list` (virtualized; see below — supports hug-content pill rows and
@@ -630,7 +641,10 @@ props (`ButtonProps::radius`, `SettingRowProps::radius`,
 `ToggleRowProps::radius`/`knobRadius`, `StepperRowProps::buttonRadius`,
 `CheckboxProps::radius`, `SliderProps::radius`, `DropdownProps::radius`,
 `RadioGroupProps::radius`, `TableProps::cellRadius`, or
-`QwertyKeyboardProps::keyRadius`) when a product theme wants rounded controls.
+`QwertyKeyboardProps::keyRadius`) when a product theme wants rounded
+controls. The control-center pieces are card language and default rounded
+instead (`SliderRowProps::buttonRadius`, `TileGridProps::radius`; 0 gives
+square cards), and `SheetProps::radius` rounds the sheet's free-edge corners.
 The builder exposes the same fields in the inspector and JSON schema.
 Dropdowns use a stroked chevron indicator by default; tune
 `DropdownProps::indicatorWidth`, `indicatorSize`, and `indicatorStroke` for a
@@ -656,6 +670,47 @@ font.increment = ActionFontLarger;
 font.controlSize = 14; // explicit plus/minus strokes, independent of font glyphs
 stepperRow(ui, rowRect, font);
 ```
+
+Control-panel surfaces (a pull-down control center, a bottom sheet of quick
+settings) compose from `sheet`, `sliderRow`/`capsuleSlider`, and `tileGrid`:
+
+```cpp
+freeink::ui::SheetProps panel;             // top-anchored card with a grabber
+panel.dismissAction = ActionClosePanel;    // tap outside the sheet closes it
+sheet(ui, panelRect, panel);
+
+freeink::ui::SliderRowProps brightness;    // caption + [-] [capsule] [+] [lamp]
+brightness.label = "Brightness";
+brightness.value = "62%";                  // caller-formatted readout
+brightness.sliderValue = 62;
+brightness.sliderAction = ActionBrightness;   // drag/tap; dragPermille carries the position
+brightness.decrement = ActionBrightnessStep;  // value -1 / +1 per press
+brightness.increment = ActionBrightnessStep;
+brightness.toggleAction = ActionLightToggle;  // trailing icon button
+brightness.toggleIcon = lampIcon;
+sliderRow(ui, rowRect, brightness);
+
+freeink::ui::TileGridItem tiles[2];
+tiles[0].label = "Night mode";
+tiles[0].value = TileNightMode;            // stable id, not grid position
+tiles[0].state = nightMode ? freeink::ui::StateChecked : freeink::ui::StateNormal;
+tiles[1].label = "Refresh";
+tiles[1].value = TileRefresh;
+freeink::ui::TileGridProps grid;
+grid.items = tiles;
+grid.count = 2;
+grid.action = ActionTile;                  // event value = the tile's id
+tileGrid(ui, gridRect, grid);
+```
+
+`sheetContentRect()` returns the part of the sheet its content may use (the
+rect minus the grabber band), `sliderRowHeight()` and `tileGridHeight()` size
+the bands, and the `Screen` wrappers (`screen.sheet(...)`, `screen.sliderRow(...)`,
+`screen.tileGrid(...)`) apply theme fonts and spacing and reserve the bands
+automatically. The capsule slider is the drag surface; the step buttons exist
+because a drag on matte glass is unreliable and single steps land exact
+values. On a rect too narrow for the capsule's handle the track is skipped
+entirely and the step buttons alone drive the value.
 
 Text-entry screens can use the generic `keyGrid` for compact custom pads,
 `keyboard` for data-driven rows, or `qwertyKeyboard` for a ready-made four-row
@@ -704,6 +759,38 @@ kb.mode();            // enter/leave the symbol layers
 freeink::ui::applyEntry(keys, kb);
 ```
 
+Apps with cursor editing or their own text container can reuse the controller
+pieces without adopting `KeyboardEntry`'s fixed buffer:
+
+- `keyboardActivationFor(layout, value, longPress)` resolves a rendered key to
+  text, Shift, mode, language, delete, or submit semantics.
+- `utf8PreviousBoundary()` / `utf8NextBoundary()` move a byte cursor without
+  splitting a UTF-8 code point.
+- `KeyboardNavigator` owns row/column selection for irregular keyboard grids,
+  including wrapping and proportional movement between differently sized rows.
+
+When input and rendering run on different tasks, capture completed one-shot
+taps before testing whether the interaction table is available. `TouchTapQueue`
+is a fixed-capacity, allocation-free queue for that boundary:
+
+```cpp
+freeink::ui::TouchTapQueue<16> pendingTaps;
+int16_t tapX = 0;
+int16_t tapY = 0;
+
+// Every input update, even while a renderer rebuilds hit targets:
+if (tapCompleted) pendingTaps.push(tapX, tapY);
+
+// Once the last complete interaction table is safe to route against:
+while (interactionsReady && pendingTaps.pop(tapX, tapY)) {
+  freeink::ui::InputSnapshot tap;
+  tap.touchReleased = true;
+  tap.touchX = tapX;
+  tap.touchY = tapY;
+  interactions.route(tap);
+}
+```
+
 For custom or app-provided layouts, pass `KeyboardProps` directly:
 
 ```cpp
@@ -716,13 +803,22 @@ keyboard.okAction = ActionKeyboardOk;
 freeink::ui::keyboard(ui, keyboardRect, keyboard);
 ```
 
-Built-in layout IDs are `QwertyEn`, `AzertyFr`, `QwertzDe`, and `SpanishEs`.
+Built-in layout IDs are `QwertyEn`, `AzertyFr`, `QwertzDe`, `SpanishEs`,
+`CyrillicRu`, `CyrillicUk`, `CyrillicBe`, `CyrillicKk`, and `HebrewIl`.
 Normal ASCII keys report their code point in `ActionEvent::value`; localized
 keys use stable non-ASCII values so firmware can map the selected key back to
 the active layout's UTF-8 output string. Visible glyph coverage depends on the
 active `DrawTarget` font asset, so devices shipping wider language support
 should include matching Noto Sans glyph ranges in their generated bitmap font or
 use a renderer with native text shaping.
+
+An app that reaches more than one script sets `builtinKeyboardLayout`'s
+`langKey` flag and a `KeyboardProps::langAction`, which puts a script-switch key
+in the bottom row. It draws a globe and takes no label of its own: which layout
+is active is already visible in the letter keys. The flag is off by default and
+the Latin layouts respect it, so a single-script keyboard renders without the
+key; the non-Latin layouts carry it either way, since a keyboard with no Latin
+letters cannot type a Wi-Fi password or a URL.
 
 Reader screens can register invisible tap zones over the page while drawing
 chrome separately:
@@ -880,6 +976,26 @@ freeink::ui::list(ui, rect, props);
 `listTopIndexFor` scrolls the window the minimal amount to keep the selection
 visible and clamps to the valid range, so GPIO up/down navigation gets correct
 scrolling for free.
+
+Rows are not all the same height: a wrapped label or subtitle grows one, so a
+layout routinely fits fewer indexes than `listVisibleRows()` estimates. Screens
+that scroll (swipe or button navigation) should therefore own a `ListNav` and
+call `nav.syncToProps(body, rowHeight, rowGap, count, props)` right before
+`list()`. `list()` reports the viewport it actually laid out back through
+`props.nav`, which gives the nav the real page size (`pageRows()`, the delta to
+page by) and lets it keep a clipped tail reachable. Because that feedback
+arrives only after a layout, a nav-managed screen must render in a small loop:
+
+```cpp
+for (int pass = 0; pass < 8; ++pass) {
+  app.render();
+  if (!nav.consumeRebuildNeeded()) break;
+}
+```
+
+Without the loop a clipped list can paint one frame with the selection or the
+scroll indicator missing. Callers repaint each pass over the previous one, so
+`list()` keeps the row geometry stable across the passes of a single render.
 
 ### Dialogs
 
