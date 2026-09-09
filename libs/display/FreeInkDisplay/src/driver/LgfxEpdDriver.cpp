@@ -105,23 +105,32 @@ FreeInkLgfxEpd g_dev;
 // Which epd_mode the non-clean path uses. epd_fast carries the old 11-pass
 // table, epd_fastest the 7-pass 1-bit one.
 //
-// **Defaults to epd_fastest since 2026-09-09**, measured and looked at on a
-// T5 S3 Pro over a real Bratislava map render (2,465 ways, 4 tiles): a marker
-// move went from 1,046 ms to 875 ms, the scan from 474 ms to 302 ms, and the
-// maintainer confirmed the panel still looks right after eight consecutive
-// moves. The 36.3 % scan saving matched the 4/11 the pass count predicts, and
-// prep did not move (572 against 573 ms), which is what says the table only
-// touches the scan.
+// **Back to epd_fast on 2026-09-09**, after the panel refused the short ones.
+// The timings were real -- a marker move drops 1,046 -> 875 ms at 7 passes, the
+// scan 474 -> 302, and prep does not move (572 against 573 ms) -- but a
+// twenty-move soak on a dithered map showed the cost:
 //
-// epd_fast is kept reachable as the rollback: the old table is longer and
-// drives two passes in the wrong direction first, so if residue ever shows up
-// on a long ride it is one CMD:EPDLUT 0 away.
+//   11 passes, two opposite pre-drive passes  ->  almost no ghosting
+//    8 passes, one pre-drive (library default) ->  unpleasant residue
+//    7 passes, no pre-drive (kFast1bitLut)     ->  visible ghosting
+//
+// **So the pre-drive is not the flash this work set out to remove; it is a
+// mini-erase, and it is what keeps residue down.** Fewer pre-drive passes
+// means more residue, monotonically.
+//
+// And on the map nothing clears it: four popup open/close cycles moved
+// ref_window by 8 and ref_fast by 4 while ref_half stayed put, so not one
+// clean frame ran. A shorter fast table only pays off once something scrubs
+// (T-274 in the parent repo), which makes that the prerequisite for this
+// rather than the follow-up.
+//
+// epd_fastest stays reachable through CMD:EPDLUT 1 for the next attempt.
 //
 // **Switching re-arms every pixel on the next frame.** Panel_EPD stores
 // pixel + (lut_offset << 8) per pixel, so a mode change makes every stored value
 // mismatch and the whole screen is re-driven once. The frame straight after a
 // switch flashes and is not a valid timing sample.
-lgfx::epd_mode::epd_mode_t g_fastMode = lgfx::epd_mode::epd_fastest;
+lgfx::epd_mode::epd_mode_t g_fastMode = lgfx::epd_mode::epd_fast;
 
 lgfx::epd_mode::epd_mode_t epdModeFor(RefreshMode m) {
   switch (m) {
