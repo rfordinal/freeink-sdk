@@ -102,16 +102,26 @@ class FreeInkLgfxEpd : public lgfx::LGFX_Device {
 
 FreeInkLgfxEpd g_dev;
 
-// Which epd_mode the non-clean path uses, so the board's two fast tables can be
-// compared on the panel without a reflash (T-273). epd_fast carries the tuned
-// 11-pass table, epd_fastest the 7-pass 1-bit probe.
+// Which epd_mode the non-clean path uses. epd_fast carries the old 11-pass
+// table, epd_fastest the 7-pass 1-bit one.
 //
-// **Switching this re-arms every pixel on the next frame.** Panel_EPD stores
+// **Defaults to epd_fastest since 2026-09-09**, measured and looked at on a
+// T5 S3 Pro over a real Bratislava map render (2,465 ways, 4 tiles): a marker
+// move went from 1,046 ms to 875 ms, the scan from 474 ms to 302 ms, and the
+// maintainer confirmed the panel still looks right after eight consecutive
+// moves. The 36.3 % scan saving matched the 4/11 the pass count predicts, and
+// prep did not move (572 against 573 ms), which is what says the table only
+// touches the scan.
+//
+// epd_fast is kept reachable as the rollback: the old table is longer and
+// drives two passes in the wrong direction first, so if residue ever shows up
+// on a long ride it is one CMD:EPDLUT 0 away.
+//
+// **Switching re-arms every pixel on the next frame.** Panel_EPD stores
 // pixel + (lut_offset << 8) per pixel, so a mode change makes every stored value
-// mismatch and the whole screen is re-driven once. That first frame after a
-// switch is not a valid timing sample and will visibly flash. Measurement only;
-// it is not a runtime feature.
-lgfx::epd_mode::epd_mode_t g_fastMode = lgfx::epd_mode::epd_fast;
+// mismatch and the whole screen is re-driven once. The frame straight after a
+// switch flashes and is not a valid timing sample.
+lgfx::epd_mode::epd_mode_t g_fastMode = lgfx::epd_mode::epd_fastest;
 
 lgfx::epd_mode::epd_mode_t epdModeFor(RefreshMode m) {
   switch (m) {
