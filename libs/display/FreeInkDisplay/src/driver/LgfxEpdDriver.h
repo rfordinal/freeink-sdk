@@ -54,4 +54,16 @@ class LgfxEpdDriver : public PanelDriver {
 
 PanelDriver& lgfxEpdDriver();
 
+// Pick which waveform table the non-clean refresh path uses, for comparing the
+// two on the panel without a reflash: 0 = the board's tuned 11-pass table,
+// 1 = its 7-pass 1-bit probe. Returns false for anything else.
+//
+// **A measurement hook, not a feature.** Switching re-arms every pixel, so the
+// first frame after a change flashes and is not a valid timing sample. It exists
+// because dose -- whether four drive passes still land a solid black on this
+// glass -- cannot be judged from a framebuffer readback, only by eye on the
+// device (T-273).
+bool setLgfxFastLut(int which);
+int getLgfxFastLut();
+
 }  // namespace freeink

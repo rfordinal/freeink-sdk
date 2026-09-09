@@ -36,6 +36,34 @@ constexpr uint32_t kFastLut[] = {
     0u,
 };
 
+// A 1-bit table for the marker-move path, and the reason it can exist at all:
+// Panel_EPD's fast branch Bayer-thresholds every 8-bit value to 0 or 0xF
+// (Panel_EPD.cpp, `readbuf[i] = (sum + (b << 4)) < 248 ? 0 : 0xF;`), so on this
+// path **columns 1-14 are unreachable** -- only 0 and 15 are ever selected. The
+// AA nudge columns kFastLut carries above are dead weight here, and so are the
+// two opposite-direction passes it opens with: a pixel heading for white is
+// driven black twice first, which is the flash a marker move produces.
+//
+// So: four passes of pure drive, no pre-drive, greys left inert. 4 drive + 1
+// idle + the terminator and the trailing empty pass = **7 passes** against
+// kFastLut's 11, at a measured 34 ms a pass (T-269).
+//
+// **Dose is the open question, not grey levels.** Fewer passes means less drive
+// into the pixel, so black may land pale or leave residue. That is decided by a
+// thumb on the panel, not here. EPD_Painter drives full black with 7 continuous
+// passes on this same glass and calls its extremes "well into saturation", so
+// four is a deliberate probe below that, not a safe default. Compare against
+// kFastLut and the library's own lut_fastest before adopting it -- CMD:EPDLUT
+// switches between the three at runtime.
+constexpr uint32_t kFast1bitLut[] = {
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    ~0u,
+    0u,
+};
+
 #undef LUT_MAKE
 
 bool writeTpsRegister(uint8_t reg, const uint8_t* data, size_t len) {
@@ -206,8 +234,11 @@ const LgfxEpdConfig& lilygoT5S3LgfxConfig() {
       0,
       kFastLut,
       sizeof(kFastLut) / sizeof(kFastLut[0]),
-      kFastLut,
-      sizeof(kFastLut) / sizeof(kFastLut[0]),
+      // lutFastest used to alias kFastLut, so asking for epd_fastest bought
+      // nothing. It now carries the 1-bit probe table, which is what makes
+      // CMD:EPDLUT's three-way comparison possible on one build.
+      kFast1bitLut,
+      sizeof(kFast1bitLut) / sizeof(kFast1bitLut[0]),
   };
   return cfg;
 }

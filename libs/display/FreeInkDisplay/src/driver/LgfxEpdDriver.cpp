@@ -102,11 +102,22 @@ class FreeInkLgfxEpd : public lgfx::LGFX_Device {
 
 FreeInkLgfxEpd g_dev;
 
+// Which epd_mode the non-clean path uses, so the board's two fast tables can be
+// compared on the panel without a reflash (T-273). epd_fast carries the tuned
+// 11-pass table, epd_fastest the 7-pass 1-bit probe.
+//
+// **Switching this re-arms every pixel on the next frame.** Panel_EPD stores
+// pixel + (lut_offset << 8) per pixel, so a mode change makes every stored value
+// mismatch and the whole screen is re-driven once. That first frame after a
+// switch is not a valid timing sample and will visibly flash. Measurement only;
+// it is not a runtime feature.
+lgfx::epd_mode::epd_mode_t g_fastMode = lgfx::epd_mode::epd_fast;
+
 lgfx::epd_mode::epd_mode_t epdModeFor(RefreshMode m) {
   switch (m) {
     case RefreshMode::Full: return lgfx::epd_mode::epd_text;
     case RefreshMode::Half: return lgfx::epd_mode::epd_text;
-    default: return lgfx::epd_mode::epd_fast;
+    default: return g_fastMode;
   }
 }
 
@@ -189,6 +200,30 @@ void pushCanvas(lgfx::epd_mode::epd_mode_t epdMode) {
 
 }  // namespace
 #endif  // FREEINK_DRIVER_LGFX_EPD
+
+bool setLgfxFastLut(int which) {
+#if FREEINK_DRIVER_LGFX_EPD
+  if (which == 0) {
+    g_fastMode = lgfx::epd_mode::epd_fast;
+  } else if (which == 1) {
+    g_fastMode = lgfx::epd_mode::epd_fastest;
+  } else {
+    return false;
+  }
+  return true;
+#else
+  (void)which;
+  return false;
+#endif
+}
+
+int getLgfxFastLut() {
+#if FREEINK_DRIVER_LGFX_EPD
+  return g_fastMode == lgfx::epd_mode::epd_fastest ? 1 : 0;
+#else
+  return 0;
+#endif
+}
 
 LgfxEpdDriver::LgfxEpdDriver(const LgfxEpdConfig& cfg) : _cfg(cfg) {}
 
