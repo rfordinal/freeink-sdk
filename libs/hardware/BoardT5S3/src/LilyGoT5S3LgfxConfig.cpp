@@ -64,6 +64,125 @@ constexpr uint32_t kFast1bitLut[] = {
     0u,
 };
 
+// The clean-frame table, and the whole point of it is the tail.
+//
+// LovyanGFX's own lut_text is 12 drive rows followed by **19 idle rows** and a
+// terminator; with the eraser prefix that is the 37 passes T-269 measured at
+// 1,249 ms. An idle row drives nothing -- it is settle time -- but it costs a
+// full pass, because blit_dmabuf still reads the row's slice of the step
+// framebuffer and the bus still clocks every row. Measured: the 37-pass frame
+// averaged 33.87 ms a pass against the 11-pass frame's 33.30, so idle passes
+// are not cheaper. **Nineteen of them is ~646 ms of pure waiting, over half the
+// clean frame.**
+//
+// That count is a time constant expressed in passes, and it was chosen for a
+// panel whose passes are far quicker than ours. At 34 ms a pass we pay several
+// times the settle the table's author intended.
+//
+// So: the 12 drive rows are LovyanGFX's, copied verbatim and checked against
+// the library source mechanically rather than by eye, because a mistyped
+// column would move a grey landing and look like a waveform problem. Only the
+// idle tail is ours.
+//
+// **Why not just use epd_quality's slot instead.** Because the branch is
+// picked by mode, and epd_text's is the only one that arms on
+// `white != d1 || d1 != s0` -- every non-white pixel, changed or not. That
+// weak diff is not a defect, it is what makes a clean frame clean: it
+// re-drives all the ink, so residue goes everywhere rather than only where
+// the image changed. epd_quality keeps the eraser but arms on `d1 != s0`, so
+// routing cleans there would stop them cleaning.
+#define LUT_MAKE(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, da, db, dc, dd, de, df) \
+  (uint32_t)((d0 << 0) | (d1 << 2) | (d2 << 4) | (d3 << 6) | (d4 << 8) | (d5 << 10) | (d6 << 12) | \
+             (d7 << 14) | (d8 << 16) | (d9 << 18) | (da << 20) | (db << 22) | (dc << 24) | \
+             (dd << 26) | (de << 28) | (df << 30))
+
+// Idle rows kept after the drive rows. **Defaults to LovyanGFX's own 19**, so
+// this file on its own changes nothing; a board opts into a shorter tail from
+// platformio.ini. Checked: at 19 the table predicts 37 passes and 1.25 s, which
+// is the 1,249 ms T-269 measured, so the knob reproduces the stock number
+// before it changes it.
+//
+// This is the knob T-273's clean half turns, and it is judged on the panel:
+// what it buys is time and what it costs is settle, and an under-settled clean
+// leaves the residue the clean existed to remove.
+#ifndef EXPLORINK_TEXT_LUT_IDLE
+#define EXPLORINK_TEXT_LUT_IDLE 19
+#endif
+
+constexpr uint32_t kTextLut[] = {
+    // 12 drive rows, verbatim from LovyanGFX lut_text.
+    LUT_MAKE(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1),
+    LUT_MAKE(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1),
+    LUT_MAKE(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1),
+    LUT_MAKE(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 1),
+    LUT_MAKE(2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 1),
+    LUT_MAKE(1, 2, 2, 1, 1, 1, 1, 1, 3, 3, 1, 1, 3, 3, 1, 2),
+    LUT_MAKE(1, 3, 3, 1, 1, 1, 1, 3, 3, 1, 1, 1, 1, 3, 1, 2),
+    LUT_MAKE(1, 3, 3, 1, 2, 2, 1, 1, 1, 1, 2, 1, 1, 1, 1, 2),
+    LUT_MAKE(3, 1, 3, 2, 2, 2, 1, 1, 1, 2, 2, 1, 1, 1, 2, 3),
+    LUT_MAKE(1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2),
+    LUT_MAKE(1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2),
+    LUT_MAKE(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 3, 3, 2),
+#if EXPLORINK_TEXT_LUT_IDLE >= 1
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 2
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 3
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 4
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 5
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 6
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 7
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 8
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 9
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 10
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 11
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 12
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 13
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 14
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 15
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 16
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 17
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 18
+    ~0u,
+#endif
+#if EXPLORINK_TEXT_LUT_IDLE >= 19
+    ~0u,
+#endif
+    0u,
+};
+
 #undef LUT_MAKE
 
 bool writeTpsRegister(uint8_t reg, const uint8_t* data, size_t len) {
@@ -230,8 +349,8 @@ const LgfxEpdConfig& lilygoT5S3LgfxConfig() {
       {&prepareEpdPower, &epdPowerOn, &epdPowerOff},
       nullptr,
       0,
-      nullptr,
-      0,
+      kTextLut,
+      sizeof(kTextLut) / sizeof(kTextLut[0]),
       kFastLut,
       sizeof(kFastLut) / sizeof(kFastLut[0]),
       // lutFastest used to alias kFastLut, so asking for epd_fastest bought
