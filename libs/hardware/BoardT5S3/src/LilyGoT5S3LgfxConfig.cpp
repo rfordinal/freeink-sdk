@@ -55,7 +55,7 @@ constexpr uint32_t kFastLut[] = {
 // four is a deliberate probe below that, not a safe default. Compare against
 // kFastLut and the library's own lut_fastest before adopting it -- CMD:EPDLUT
 // switches between the three at runtime.
-constexpr uint32_t kFast1bitLut[] = {
+[[maybe_unused]] constexpr uint32_t kFast1bitLut[] = {
     LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
     LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
     LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
@@ -353,11 +353,20 @@ const LgfxEpdConfig& lilygoT5S3LgfxConfig() {
       sizeof(kTextLut) / sizeof(kTextLut[0]),
       kFastLut,
       sizeof(kFastLut) / sizeof(kFastLut[0]),
-      // lutFastest used to alias kFastLut, so asking for epd_fastest bought
-      // nothing. It now carries the 1-bit probe table, which is what makes
-      // CMD:EPDLUT's three-way comparison possible on one build.
-      kFast1bitLut,
-      sizeof(kFast1bitLut) / sizeof(kFast1bitLut[0]),
+      // Left null on purpose, so epd_fastest falls through to LovyanGFX's own
+      // lut_fastest: 5 drive rows with **one** opposite pre-drive pass, 8
+      // passes in total.
+      //
+      // That middle table is the candidate the panel asked for on 2026-09-09.
+      // kFast1bitLut (below, kept for reference) dropped the pre-drive
+      // altogether for 7 passes and 875 ms a marker move, and the maintainer
+      // called its ghosting visible but acceptable -- until the control ran.
+      // kFastLut's 11 passes, with **two** pre-drive passes, ghosted almost
+      // not at all at 1,046 ms. So the pre-drive was never just the flash this
+      // work set out to remove; it is doing the residue work, and the question
+      // is how little of it suffices.
+      nullptr,
+      0,
   };
   return cfg;
 }
