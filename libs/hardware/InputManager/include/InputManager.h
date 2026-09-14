@@ -105,6 +105,20 @@ class InputManager {
     MultiTouchPoint points[MAX_TOUCH_CONTACTS];
   };
 
+  // One GT911 frame as the controller reported it, before any interpretation.
+  //
+  // Raw records rather than decoded points on purpose: decoding needs
+  // BoardConfig and the mounting correction, which is policy, and a frame that
+  // crosses a thread boundary should carry only what the chip said. `timestamp`
+  // is when the frame was READ, which is the only honest time for it.
+  struct Gt911Frame {
+    unsigned long timestamp;
+    uint8_t status;                            // 0x814E: bit 7 ready, bit 4 home key, bits 3..0 contacts
+    uint8_t storedCount;                       // records actually read, <= MAX_TOUCH_CONTACTS
+    uint8_t records[MAX_TOUCH_CONTACTS * 8];   // 0x8150 onward, undecoded
+    bool pointsValid;                          // false when the point read failed but the status did not
+  };
+
   // True if this board has a touch controller configured.
   bool hasTouch() const;
   // True only while a GT911 controller is present. Other touch controllers
@@ -301,7 +315,21 @@ class InputManager {
   uint8_t serviceTouch();  // runs the machine; returns synthesized button mask
   void updateTouchFromIrq(unsigned long now,
                           int irqRaw);  // CHSC6x I2C poll + touch-bit gate
-  void pollGt911(unsigned long now);    // GT911 polled read
+  // GT911, split in two so the I2C half can run somewhere other than the app's
+  // loop. Measured on an X4 Pro 2026-09-14: the controller holds exactly one
+  // unacknowledged frame and produces no further frame until 0x814E is cleared,
+  // so a loop blocked for a panel refresh (2.8 s for a redraw, 4.3 s to open a
+  // map) destroys every edge of a gesture but the first. Reading has to happen
+  // on a schedule the renderer cannot stall; applying does not.
+  //
+  // The split is exact: `readFrame` performs every I2C access and the clear and
+  // touches no gesture state; `applyFrame` performs no I2C and is the whole of
+  // the previous `pollGt911()` body. `now` was already a parameter, so a frame
+  // applied late is stamped with when it was READ rather than when it was
+  // handled, which is the property the whole redesign turns on.
+  bool gt911ReadFrame(Gt911Frame& frame);
+  void gt911ApplyFrame(const Gt911Frame& frame);
+  void pollGt911(unsigned long now);    // read + apply, for the synchronous path
   void beginFt5x06();
   void pollFt5x06(unsigned long now);
   bool ft5x06WriteReg(uint8_t reg, uint8_t value);

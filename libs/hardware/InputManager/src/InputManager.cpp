@@ -2050,12 +2050,41 @@ void InputManager::pollFt6336u(const unsigned long now) {
   }
 }
 
-void InputManager::pollGt911(const unsigned long now) {
-  if (gt911Addr == 0) {
-    return;
+// The I2C half. Everything that talks to the chip, and nothing that interprets
+// what it said. See the header for why the two halves are separable.
+bool InputManager::gt911ReadFrame(Gt911Frame& frame) {
+  frame = {};
+  if (gt911Addr == 0) return false;
+
+  if (!gt911ReadReg(0x814E, &frame.status, 1)) {
+    // Same reasoning as the synchronous path: a transient I2C failure must not
+    // look like a zero-contact frame to anything downstream, so it is reported
+    // as "no frame" rather than as an empty one.
+    return false;
   }
-  uint8_t status = 0;
-  if (!gt911ReadReg(0x814E, &status, 1)) {
+  frame.timestamp = millis();
+
+  // Only a ready frame carries records, and only a ready frame is acknowledged.
+  // Clearing a status with bit 7 clear would be a write with nothing to release.
+  if ((frame.status & 0x80) == 0) return true;
+
+  const uint8_t count = frame.status & 0x0F;
+  if (count > 0) {
+    frame.storedCount = std::min<uint8_t>(count, MAX_TOUCH_CONTACTS);
+    frame.pointsValid = gt911ReadReg(0x8150, frame.records, frame.storedCount * 8);
+  }
+
+  // The acknowledgment, and the reason this half must not be starved: until it
+  // happens the controller produces no further frame at all (measured, X4 Pro
+  // 2026-09-14 -- one frame held 7.99 s of an 8.00 s capture with the key being
+  // tapped throughout, and not one of those taps reached the register).
+  gt911ClearStatus();
+  return true;
+}
+
+void InputManager::pollGt911(const unsigned long now) {
+  Gt911Frame frame;
+  if (!gt911ReadFrame(frame)) {
     // Keep the last complete frame while the single-touch state remains
     // latched. Clearing only this snapshot makes a transient I2C failure look
     // like a multi-contact release to multi-touch consumers, which can split one
@@ -2063,7 +2092,17 @@ void InputManager::pollGt911(const unsigned long now) {
     // the snapshot together with the rest of the touch state.
     return;
   }
+  // The synchronous path keeps its caller's clock, so nothing about timing
+  // changes for a board that never starts the task.
+  frame.timestamp = now;
+  gt911ApplyFrame(frame);
+}
 
+// The interpretation half. No I2C, so it may run late, in another thread, or
+// over a frame read seconds ago -- which is the point.
+void InputManager::gt911ApplyFrame(const Gt911Frame& frame) {
+  const unsigned long now = frame.timestamp;
+  const uint8_t status = frame.status;
   // Capacitive home key long-press (status bit 0x10). Fire from the LATCHED
   // down-state + wall clock, BEFORE the buffer-ready gate below: a motionless
   // hold stops producing new-data frames (0x80 stays clear), so gating the hold
@@ -2092,12 +2131,12 @@ void InputManager::pollGt911(const unsigned long now) {
 
   const uint8_t count = status & 0x0F;
   if (count > 0) {
-    // GT911 stores each contact in a contiguous 8-byte record at 0x8150. Read
-    // the bounded records in one transaction so every stored contact comes
-    // from one coherent controller frame.
-    const uint8_t storedCount = std::min<uint8_t>(count, MAX_TOUCH_CONTACTS);
-    uint8_t points[MAX_TOUCH_CONTACTS * 8] = {};
-    if (gt911ReadReg(0x8150, points, storedCount * 8)) {
+    // The records were read in one transaction by gt911ReadFrame(), so every
+    // stored contact comes from one coherent controller frame even when this
+    // runs long afterwards.
+    const uint8_t storedCount = frame.storedCount;
+    const uint8_t* points = frame.records;
+    if (frame.pointsValid) {
       const auto& t = BoardConfig::ACTIVE.touch;
       touchSnapshot.reportedCount = count;
       touchSnapshot.idsStable = !t.gt911CoordsAtByte0;
@@ -2178,8 +2217,6 @@ void InputManager::pollGt911(const unsigned long now) {
     touchPressed = false;
     touchPoint.valid = false;
   }
-
-  gt911ClearStatus();  // GT911 requires clearing 0x814E after each read
 }
 
 #endif  // FREEINK_CAP_TOUCH
