@@ -164,6 +164,19 @@ class InputManager {
   };
   void setHomeKeyGestureSpec(const HomeKeyGestureSpec& spec);
 
+  // How old a COMPLETED glass contact may be before its tap is refused, in ms.
+  // 0 (the default) never refuses one.
+  //
+  // Same argument as the home key's tap, and the glass needs it more: a tap is
+  // aimed at a particular row or a particular place on a map, and after a render
+  // that took seconds the thing it was aimed at has moved or gone. The age is
+  // tested at the RELEASE, not the press -- a finger still down when the loop
+  // resumes is a live interaction whatever time it started, and only a gesture
+  // that began and ended unseen is stale.
+  //
+  // A number, not a policy: what it should be is the app's call, like the key's.
+  void setTouchStaleMs(uint16_t ms);
+
   // What the sampling task actually managed to do, so "the fix works" can be
   // told apart from "the run was lucky".
   //
@@ -520,6 +533,7 @@ class InputManager {
 
   // Recogniser state, written only where the reading happens.
   HomeKeyGestureSpec homeKeySpec{};
+  uint16_t touchStaleMs = 0;
   unsigned long keyPendingTapAt = 0;  // a tap waiting to find out if a second is coming; 0 = none
   unsigned long keyLastTickAt = 0;    // for the gap rule below
   bool keySwallowRelease = false;     // the release that completed a double tap emits nothing
@@ -532,6 +546,11 @@ class InputManager {
   volatile bool _gt911FrameOverflow = false;   // the queue filled; the stream is torn
   unsigned long _gt911LastQueuedMs = 0;
   uint8_t _gt911LastQueuedStatus = 0xFF;
+  // The most recent frame coalescing threw away. It is queued ahead of the next
+  // edge so a release is never the first thing the app sees after a press --
+  // see gt911TaskLoop() for what that costs when it is missing.
+  Gt911Frame _gt911Skipped{};
+  bool _gt911HasSkipped = false;
   volatile uint32_t _gt911Ticks = 0;
   volatile uint32_t _gt911MaxGapUs = 0;
   volatile uint32_t _gt911GapsOverLimit = 0;
