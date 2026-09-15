@@ -185,6 +185,27 @@ class InputManager {
   // ever true when doubleWindowMs is non-zero.
   bool wasHomeKeyDoubleTapped() const;
 
+  // When the key event delivered this frame actually happened, in millis().
+  //
+  // The whole reason for a recogniser next to the read is that a gesture carries
+  // the time the FINGER made it rather than the time the loop got round to it.
+  // Exposing that is what lets a caller refuse to act on a stale one -- and
+  // whether a given gesture may go stale is a question about meaning, so it is
+  // answered up in the app and not here. A tap is a contextual action and the
+  // context moves; a double tap is a mode toggle and cannot age.
+  //
+  // Zero when no key event was delivered this frame.
+  unsigned long homeKeyEventAtMs() const;
+
+  // Bookkeeping for the same reason the task counts its cadence: so "a gesture
+  // went missing" can be told apart from "a gesture was never made".
+  struct HomeKeyCounters {
+    uint32_t produced;    // gestures the recogniser emitted
+    uint32_t delivered;   // gestures update() handed to the app
+    uint32_t queueDrops;  // gestures lost because the queue was full
+  };
+  HomeKeyCounters homeKeyCounters(bool reset);
+
   // True if this board has a touch controller configured.
   bool hasTouch() const;
   // True only while a GT911 controller is present. Other touch controllers
@@ -484,6 +505,18 @@ class InputManager {
   bool touchHomeKeyLongFired = false;  // latched for the current hold so long
                                        // fires once and suppresses the tap
   bool touchHomeKeyDoubleTapEvent = false;  // one-shot, cleared each update()
+  unsigned long touchHomeKeyEventAtMs = 0;  // when this frame's event happened; 0 = none
+
+  // One queued gesture: the type, and when the finger made it. The timestamp is
+  // the payload that the old design could not carry -- without it a late
+  // delivery is indistinguishable from a prompt one.
+  struct HomeKeyEvent {
+    uint8_t type;
+    uint32_t atMs;
+  };
+  volatile uint32_t _keyProduced = 0;
+  volatile uint32_t _keyDelivered = 0;
+  volatile uint32_t _keyQueueDrops = 0;
 
   // Recogniser state, written only where the reading happens.
   HomeKeyGestureSpec homeKeySpec{};

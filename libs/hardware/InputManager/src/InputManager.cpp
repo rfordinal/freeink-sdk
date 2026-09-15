@@ -347,7 +347,7 @@ void InputManager::beginGt911Task(const uint8_t taskPriority, const uint32_t pol
 
   _gt911PollMs = pollMs == 0 ? 10 : pollMs;
   _gt911FrameQueue = xQueueCreate(64, sizeof(Gt911Frame));
-  _gt911GestureQueue = xQueueCreate(16, sizeof(uint8_t));
+  _gt911GestureQueue = xQueueCreate(16, sizeof(HomeKeyEvent));
   if (_gt911FrameQueue == nullptr || _gt911GestureQueue == nullptr) {
     log_e("beginGt911Task: out of memory");
     if (_gt911FrameQueue) vQueueDelete(_gt911FrameQueue);
@@ -383,6 +383,18 @@ InputManager::Gt911TaskStats InputManager::gt911TaskStats(const bool reset) {
 void InputManager::setHomeKeyGestureSpec(const HomeKeyGestureSpec& spec) { homeKeySpec = spec; }
 
 bool InputManager::wasHomeKeyDoubleTapped() const { return touchHomeKeyDoubleTapEvent; }
+
+unsigned long InputManager::homeKeyEventAtMs() const { return touchHomeKeyEventAtMs; }
+
+InputManager::HomeKeyCounters InputManager::homeKeyCounters(const bool reset) {
+  HomeKeyCounters out{_keyProduced, _keyDelivered, _keyQueueDrops};
+  if (reset) {
+    _keyProduced = 0;
+    _keyDelivered = 0;
+    _keyQueueDrops = 0;
+  }
+  return out;
+}
 
 bool InputManager::popPress(uint8_t& button) {
   if (!_asyncQueue) return false;
@@ -631,6 +643,7 @@ void InputManager::update() {
   touchHomeKeyTapEvent = false;
   touchHomeKeyLongEvent = false;
   touchHomeKeyDoubleTapEvent = false;
+  touchHomeKeyEventAtMs = 0;
 
   if (BoardConfig::ACTIVE.inputStyle == BoardConfig::InputStyle::DigitalConfirmBackHold) {
     updateConfirmBackHold(currentTime);
@@ -669,9 +682,11 @@ void InputManager::update() {
   // selects". Delivering one per call spreads a backlog over consecutive frames
   // instead of destroying it -- 53 ms apart on the map screen.
   if (_gt911GestureQueue != nullptr) {
-    uint8_t gesture = 0;
-    if (xQueueReceive(_gt911GestureQueue, &gesture, 0) == pdTRUE) {
-      switch (static_cast<HomeKeyGesture>(gesture)) {
+    HomeKeyEvent event{};
+    if (xQueueReceive(_gt911GestureQueue, &event, 0) == pdTRUE) {
+      ++_keyDelivered;
+      touchHomeKeyEventAtMs = event.atMs;
+      switch (static_cast<HomeKeyGesture>(event.type)) {
         case HomeKeyGesture::Press:     touchHomeKeyEvent = true; break;
         case HomeKeyGesture::Tap:       touchHomeKeyTapEvent = true; break;
         case HomeKeyGesture::DoubleTap: touchHomeKeyDoubleTapEvent = true; break;
@@ -2245,7 +2260,10 @@ bool InputManager::gt911ReadFrame(Gt911Frame& frame) {
 }
 
 void InputManager::gt911PushKeyGesture(const uint8_t gesture, const unsigned long now) {
+  ++_keyProduced;
   if (_gt911GestureQueue == nullptr) {
+    touchHomeKeyEventAtMs = now;
+    ++_keyDelivered;
     // No task: deliver straight into the one-shot flags, which is what the
     // synchronous path has always done.
     switch (static_cast<HomeKeyGesture>(gesture)) {
@@ -2257,8 +2275,8 @@ void InputManager::gt911PushKeyGesture(const uint8_t gesture, const unsigned lon
     }
     return;
   }
-  (void)now;
-  xQueueSend(_gt911GestureQueue, &gesture, 0);
+  const HomeKeyEvent event{gesture, static_cast<uint32_t>(now)};
+  if (xQueueSend(_gt911GestureQueue, &event, 0) != pdTRUE) ++_keyQueueDrops;
 }
 
 void InputManager::gt911RecogniseKey(const unsigned long now, const bool frameReady, const bool keyDown) {
