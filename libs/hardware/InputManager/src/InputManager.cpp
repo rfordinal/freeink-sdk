@@ -218,6 +218,17 @@ uint8_t InputManager::getState() {
   return state;
 }
 
+namespace {
+// A sampler that stalled longer than this cannot be trusted about the level it
+// last saw: the key may have been released and re-pressed behind the gap, and
+// the controller discards everything behind an unacknowledged frame. Believing
+// the stale level is how a missed release becomes a phantom long press seconds
+// later (measured 2026-09-05: a double tap lit the frontlight once the map had
+// finished rendering). 100 ms is ten controller frames -- far beyond any real
+// sampling jitter, far below the 700 ms hold.
+constexpr unsigned long kKeyGapCancelMs = 100;
+}  // namespace
+
 InputManager::ButtonHook InputManager::s_buttonHook = nullptr;
 
 void InputManager::beginAsync(const uint8_t taskPriority, const uint32_t pollMs, const uint8_t queueLen) {
@@ -287,6 +298,17 @@ void InputManager::gt911TaskTrampoline(void* self) { static_cast<InputManager*>(
 void InputManager::gt911TaskLoop() {
 #if FREEINK_CAP_TOUCH
   for (;;) {
+    // Measured before the read, so a slow read counts against the next interval
+    // rather than hiding inside this one.
+    const unsigned long tickUs = micros();
+    if (_gt911LastTickUs != 0) {
+      const uint32_t gap = static_cast<uint32_t>(tickUs - _gt911LastTickUs);
+      if (gap > _gt911MaxGapUs) _gt911MaxGapUs = gap;
+      if (gap > kKeyGapCancelMs * 1000UL) ++_gt911GapsOverLimit;
+    }
+    _gt911LastTickUs = tickUs;
+    ++_gt911Ticks;
+
     Gt911Frame frame;
     if (gt911ReadFrame(frame)) {
       const bool ready = (frame.status & 0x80) != 0;
@@ -294,7 +316,10 @@ void InputManager::gt911TaskLoop() {
       // timestamp. That is the whole point of the task.
       gt911RecogniseKey(frame.timestamp, ready, (frame.status & 0x10) != 0);
       if (ready && gt911FrameWorthQueueing(frame)) {
-        if (xQueueSend(_gt911FrameQueue, &frame, 0) != pdTRUE) _gt911FrameOverflow = true;
+        if (xQueueSend(_gt911FrameQueue, &frame, 0) != pdTRUE) {
+          _gt911FrameOverflow = true;
+          ++_gt911Overflows;
+        }
         _gt911LastQueuedMs = frame.timestamp;
         _gt911LastQueuedStatus = frame.status;
       }
@@ -338,6 +363,21 @@ void InputManager::beginGt911Task(const uint8_t taskPriority, const uint32_t pol
   (void)taskPriority;
   (void)pollMs;
 #endif
+}
+
+InputManager::Gt911TaskStats InputManager::gt911TaskStats(const bool reset) {
+  Gt911TaskStats out{_gt911Ticks, _gt911MaxGapUs, _gt911GapsOverLimit, _gt911Cancels, _gt911Overflows};
+  if (reset) {
+    _gt911Ticks = 0;
+    _gt911MaxGapUs = 0;
+    _gt911GapsOverLimit = 0;
+    _gt911Cancels = 0;
+    _gt911Overflows = 0;
+    // Deliberately NOT clearing _gt911LastTickUs: the interval that straddles a
+    // report is a real interval and hiding it would make every report look
+    // better than the run was.
+  }
+  return out;
 }
 
 void InputManager::setHomeKeyGestureSpec(const HomeKeyGestureSpec& spec) { homeKeySpec = spec; }
@@ -2204,17 +2244,6 @@ bool InputManager::gt911ReadFrame(Gt911Frame& frame) {
   return true;
 }
 
-namespace {
-// A sampler that stalled longer than this cannot be trusted about the level it
-// last saw: the key may have been released and re-pressed behind the gap, and
-// the controller discards everything behind an unacknowledged frame. Believing
-// the stale level is how a missed release becomes a phantom long press seconds
-// later (measured 2026-09-05: a double tap lit the frontlight once the map had
-// finished rendering). 100 ms is ten controller frames -- far beyond any real
-// sampling jitter, far below the 700 ms hold.
-constexpr unsigned long kKeyGapCancelMs = 100;
-}  // namespace
-
 void InputManager::gt911PushKeyGesture(const uint8_t gesture, const unsigned long now) {
   if (_gt911GestureQueue == nullptr) {
     // No task: deliver straight into the one-shot flags, which is what the
@@ -2237,7 +2266,10 @@ void InputManager::gt911RecogniseKey(const unsigned long now, const bool frameRe
   // stall the level is not evidence. Dropping a gesture is the cheap failure;
   // inventing one costs a 1-2 s panel refresh.
   if (keyLastTickAt != 0 && now - keyLastTickAt > kKeyGapCancelMs) {
-    if (touchHomeKeyDown || keyPendingTapAt != 0) gt911PushKeyGesture(static_cast<uint8_t>(HomeKeyGesture::Cancel), now);
+    if (touchHomeKeyDown || keyPendingTapAt != 0) {
+      ++_gt911Cancels;
+      gt911PushKeyGesture(static_cast<uint8_t>(HomeKeyGesture::Cancel), now);
+    }
     touchHomeKeyDown = false;
     touchHomeKeyLongFired = false;
     keyPendingTapAt = 0;

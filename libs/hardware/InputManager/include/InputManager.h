@@ -164,6 +164,23 @@ class InputManager {
   };
   void setHomeKeyGestureSpec(const HomeKeyGestureSpec& spec);
 
+  // What the sampling task actually managed to do, so "the fix works" can be
+  // told apart from "the run was lucky".
+  //
+  // The loop is SUPPOSED to stall -- that is the condition being survived -- so
+  // a passing double tap proves nothing on its own unless the task's own cadence
+  // is known to have held through it. `cancels` is the honest failure count: the
+  // gap rule firing means a gesture was dropped rather than mistimed, which is
+  // the intended degradation and not a success.
+  struct Gt911TaskStats {
+    uint32_t ticks;           // sampler iterations since the last reset
+    uint32_t maxGapUs;        // worst interval between two of them
+    uint32_t gapsOverLimit;   // intervals past the cancel threshold
+    uint32_t cancels;         // gestures dropped because of one
+    uint32_t frameOverflows;  // contact frames lost to a full queue
+  };
+  Gt911TaskStats gt911TaskStats(bool reset);
+
   // One-shot, cleared each #update(), like the rest of the key's events. Only
   // ever true when doubleWindowMs is non-zero.
   bool wasHomeKeyDoubleTapped() const;
@@ -482,6 +499,12 @@ class InputManager {
   volatile bool _gt911FrameOverflow = false;   // the queue filled; the stream is torn
   unsigned long _gt911LastQueuedMs = 0;
   uint8_t _gt911LastQueuedStatus = 0xFF;
+  volatile uint32_t _gt911Ticks = 0;
+  volatile uint32_t _gt911MaxGapUs = 0;
+  volatile uint32_t _gt911GapsOverLimit = 0;
+  volatile uint32_t _gt911Cancels = 0;
+  volatile uint32_t _gt911Overflows = 0;
+  unsigned long _gt911LastTickUs = 0;
   unsigned long touchHomeKeyDownAt = 0;
   static constexpr unsigned long HOME_KEY_LONG_PRESS_MS = 700;
   TouchPoint touchPoint = {false, 0, 0, 0};
