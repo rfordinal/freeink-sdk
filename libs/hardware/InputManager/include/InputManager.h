@@ -119,6 +119,55 @@ class InputManager {
     bool pointsValid;                          // false when the point read failed but the status did not
   };
 
+  // --- The GT911's own sampling task -------------------------------------
+  //
+  // Why this exists, measured on an X4 Pro 2026-09-14. The controller holds
+  // exactly ONE unacknowledged frame and produces no further frame until 0x814E
+  // is cleared: one frame sat in the register for 7.99 s of an 8.00 s capture
+  // while the capacitive key was tapped throughout, and not one of those taps
+  // reached it. The app's loop stops sampling for 2.80 s on a map redraw and
+  // 4.34 s opening the map. Every edge of a gesture made in that window but the
+  // first is therefore destroyed, and a double tap arrives as a single tap.
+  //
+  // No policy for acknowledging frames can fix that -- NOT clearing is worse,
+  // because the controller then reports nothing at all. The only fix is to read
+  // on a schedule the renderer cannot stall, which is what this task is.
+  //
+  // It owns the I2C half and the home key's recogniser. Contact frames are
+  // handed to the app's thread through a queue and interpreted there, because
+  // the glass is consumed as a live level (drag, touch-down select, hint boxes)
+  // and a finished-gesture queue cannot answer "where is the finger now".
+  //
+  // No-op unless a GT911 is present, so a board without one pays no stack and no
+  // task slot. Mutually exclusive with beginAsync(), which drives update() from
+  // a task of its own -- two threads in this class's unlocked state is a data
+  // race, so the second caller is refused.
+  void beginGt911Task(uint8_t taskPriority = 3, uint32_t pollMs = 10);
+
+  // What the home key's recogniser is looking for. A board that does not carry a
+  // double tap sets doubleWindowMs = 0, which makes a tap fire the instant the
+  // key is released -- the default, because waiting is a latency cost and only a
+  // board that spends it should pay it.
+  //
+  // minInterTapMs is a LOWER bound on the gap between two taps, the way Android's
+  // DOUBLE_TAP_MIN_TIME is (40 ms). It rejects contact bounce without swallowing
+  // a fast third tap, which is what a refractory window does.
+  // What the recogniser emits. Press is kept as its own event rather than
+  // folded into Tap because the sleep timer counts any key activity, and
+  // because ordering through one queue is what keeps a late drain honest.
+  enum class HomeKeyGesture : uint8_t { Press, Tap, DoubleTap, LongPress, Cancel };
+
+  struct HomeKeyGestureSpec {
+    uint16_t longMs = 700;
+    uint16_t doubleWindowMs = 0;
+    uint16_t minInterTapMs = 40;
+  };
+  void setHomeKeyGestureSpec(const HomeKeyGestureSpec& spec);
+
+  // One-shot, cleared each #update(), like the rest of the key's events. Only
+  // ever true when doubleWindowMs is non-zero.
+  bool wasHomeKeyDoubleTapped() const;
+
   // True if this board has a touch controller configured.
   bool hasTouch() const;
   // True only while a GT911 controller is present. Other touch controllers
@@ -330,6 +379,19 @@ class InputManager {
   bool gt911ReadFrame(Gt911Frame& frame);
   void gt911ApplyFrame(const Gt911Frame& frame);
   void pollGt911(unsigned long now);    // read + apply, for the synchronous path
+
+  // The home key's recogniser. Runs wherever the reading runs -- in the task
+  // when there is one, in update() otherwise -- because a recogniser fed on a
+  // slow thread measures that thread's latency instead of the finger's timing.
+  // `frameReady` is false for a tick with no new frame; the hold timer and the
+  // double-tap window still have to advance on those.
+  void gt911RecogniseKey(unsigned long now, bool frameReady, bool keyDown);
+  void gt911PushKeyGesture(uint8_t gesture, unsigned long now);
+  static void gt911TaskTrampoline(void* self);
+  void gt911TaskLoop();
+  // True when a frame is worth queueing: an edge always, a resting contact at a
+  // reduced rate. A 4.3 s render at 10 ms would otherwise be 430 frames.
+  bool gt911FrameWorthQueueing(const Gt911Frame& frame) const;
   void beginFt5x06();
   void pollFt5x06(unsigned long now);
   bool ft5x06WriteReg(uint8_t reg, uint8_t value);
@@ -404,6 +466,22 @@ class InputManager {
   bool touchHomeKeyLongEvent = false;  // held past the long-press threshold (one-shot)
   bool touchHomeKeyLongFired = false;  // latched for the current hold so long
                                        // fires once and suppresses the tap
+  bool touchHomeKeyDoubleTapEvent = false;  // one-shot, cleared each update()
+
+  // Recogniser state, written only where the reading happens.
+  HomeKeyGestureSpec homeKeySpec{};
+  unsigned long keyPendingTapAt = 0;  // a tap waiting to find out if a second is coming; 0 = none
+  unsigned long keyLastTickAt = 0;    // for the gap rule below
+  bool keySwallowRelease = false;     // the release that completed a double tap emits nothing
+
+  // GT911 task and its two channels.
+  TaskHandle_t _gt911Task = nullptr;
+  uint32_t _gt911PollMs = 10;
+  QueueHandle_t _gt911FrameQueue = nullptr;    // contact frames, applied on the app thread
+  QueueHandle_t _gt911GestureQueue = nullptr;  // finished key gestures
+  volatile bool _gt911FrameOverflow = false;   // the queue filled; the stream is torn
+  unsigned long _gt911LastQueuedMs = 0;
+  uint8_t _gt911LastQueuedStatus = 0xFF;
   unsigned long touchHomeKeyDownAt = 0;
   static constexpr unsigned long HOME_KEY_LONG_PRESS_MS = 700;
   TouchPoint touchPoint = {false, 0, 0, 0};

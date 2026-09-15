@@ -222,6 +222,14 @@ InputManager::ButtonHook InputManager::s_buttonHook = nullptr;
 
 void InputManager::beginAsync(const uint8_t taskPriority, const uint32_t pollMs, const uint8_t queueLen) {
   if (_asyncTask) return;  // already running
+#if FREEINK_CAP_TOUCH
+  if (_gt911Task) {
+    // Symmetric refusal: the GT911 task already owns the bus and the key, and
+    // this one would call update() from a second thread on top of it.
+    log_e("beginAsync: refused, beginGt911Task() already owns the input state");
+    return;
+  }
+#endif
   _asyncPollMs = pollMs;
   _asyncQueue = xQueueCreate(queueLen, sizeof(uint8_t));
   if (!_asyncQueue) return;
@@ -263,6 +271,78 @@ void InputManager::asyncPoll() {
     vTaskDelay(pdMS_TO_TICKS(_asyncPollMs));
   }
 }
+
+bool InputManager::gt911FrameWorthQueueing(const Gt911Frame& frame) const {
+  // An edge always goes. A resting or dragging contact reports at 100 Hz and the
+  // contact machine does not need every sample of it -- at 4.3 s of blocked loop
+  // that would be 430 frames and several kB of queue. 50 ms still tracks a drag
+  // finely enough for the touch-down select and the sliders, which the app reads
+  // at 53 ms at best anyway.
+  if (frame.status != _gt911LastQueuedStatus) return true;
+  return frame.timestamp - _gt911LastQueuedMs >= 50;
+}
+
+void InputManager::gt911TaskTrampoline(void* self) { static_cast<InputManager*>(self)->gt911TaskLoop(); }
+
+void InputManager::gt911TaskLoop() {
+#if FREEINK_CAP_TOUCH
+  for (;;) {
+    Gt911Frame frame;
+    if (gt911ReadFrame(frame)) {
+      const bool ready = (frame.status & 0x80) != 0;
+      // The key is recognised here, next to the read, with the frame's own
+      // timestamp. That is the whole point of the task.
+      gt911RecogniseKey(frame.timestamp, ready, (frame.status & 0x10) != 0);
+      if (ready && gt911FrameWorthQueueing(frame)) {
+        if (xQueueSend(_gt911FrameQueue, &frame, 0) != pdTRUE) _gt911FrameOverflow = true;
+        _gt911LastQueuedMs = frame.timestamp;
+        _gt911LastQueuedStatus = frame.status;
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(_gt911PollMs));
+  }
+#endif
+}
+
+void InputManager::beginGt911Task(const uint8_t taskPriority, const uint32_t pollMs) {
+#if FREEINK_CAP_TOUCH
+  if (_gt911Task) return;  // already running
+  if (_asyncTask) {
+    // beginAsync() drives update() from a task of its own and its contract says
+    // the app must not call update(). Two threads in this class's unlocked state
+    // is a data race on every field, so the second caller is refused rather than
+    // silently winning.
+    log_e("beginGt911Task: refused, beginAsync() already owns the input state");
+    return;
+  }
+  // No GT911, no task: a board without one would pay a stack and a task slot for
+  // a chip that never answers. gt911Addr is the probe's own result, so this is
+  // "the chip replied", not "the board profile says it should".
+  if (BoardConfig::ACTIVE.touch.controller != BoardConfig::TouchController::Gt911 || gt911Addr == 0) return;
+
+  _gt911PollMs = pollMs == 0 ? 10 : pollMs;
+  _gt911FrameQueue = xQueueCreate(64, sizeof(Gt911Frame));
+  _gt911GestureQueue = xQueueCreate(16, sizeof(uint8_t));
+  if (_gt911FrameQueue == nullptr || _gt911GestureQueue == nullptr) {
+    log_e("beginGt911Task: out of memory");
+    if (_gt911FrameQueue) vQueueDelete(_gt911FrameQueue);
+    if (_gt911GestureQueue) vQueueDelete(_gt911GestureQueue);
+    _gt911FrameQueue = nullptr;
+    _gt911GestureQueue = nullptr;
+    return;
+  }
+  // Above loopTask (priority 1) so a CPU-bound render cannot starve it; the
+  // panel's own waits yield, so this preempts rather than fights.
+  xTaskCreate(gt911TaskTrampoline, "fi_gt911", 3072, this, taskPriority, &_gt911Task);
+#else
+  (void)taskPriority;
+  (void)pollMs;
+#endif
+}
+
+void InputManager::setHomeKeyGestureSpec(const HomeKeyGestureSpec& spec) { homeKeySpec = spec; }
+
+bool InputManager::wasHomeKeyDoubleTapped() const { return touchHomeKeyDoubleTapEvent; }
 
 bool InputManager::popPress(uint8_t& button) {
   if (!_asyncQueue) return false;
@@ -510,6 +590,7 @@ void InputManager::update() {
   touchHomeKeyEvent = false;
   touchHomeKeyTapEvent = false;
   touchHomeKeyLongEvent = false;
+  touchHomeKeyDoubleTapEvent = false;
 
   if (BoardConfig::ACTIVE.inputStyle == BoardConfig::InputStyle::DigitalConfirmBackHold) {
     updateConfirmBackHold(currentTime);
@@ -537,6 +618,29 @@ void InputManager::update() {
       applyStateChange(state, currentTime);
     }
   }
+
+#if FREEINK_CAP_TOUCH
+  // Exactly ONE key gesture per update(), never a drain.
+  //
+  // The events below are one-shot booleans cleared at the top of this function,
+  // so mapping a whole queue into them in one call collapses it: two double taps
+  // in a backlog would toggle the touch lock once instead of twice, and a tap
+  // plus a hold would fire both in the same frame, breaking "a hold never also
+  // selects". Delivering one per call spreads a backlog over consecutive frames
+  // instead of destroying it -- 53 ms apart on the map screen.
+  if (_gt911GestureQueue != nullptr) {
+    uint8_t gesture = 0;
+    if (xQueueReceive(_gt911GestureQueue, &gesture, 0) == pdTRUE) {
+      switch (static_cast<HomeKeyGesture>(gesture)) {
+        case HomeKeyGesture::Press:     touchHomeKeyEvent = true; break;
+        case HomeKeyGesture::Tap:       touchHomeKeyTapEvent = true; break;
+        case HomeKeyGesture::DoubleTap: touchHomeKeyDoubleTapEvent = true; break;
+        case HomeKeyGesture::LongPress: touchHomeKeyLongEvent = true; break;
+        case HomeKeyGesture::Cancel:    break;  // the recogniser retracting itself
+      }
+    }
+  }
+#endif
 }
 
 bool InputManager::isPressed(const uint8_t buttonIndex) const { return currentState & (1 << buttonIndex); }
@@ -1201,7 +1305,25 @@ uint8_t InputManager::serviceTouch() {
   }
 
   if (t.controller == BoardConfig::TouchController::Gt911) {
-    pollGt911(now);
+    if (_gt911Task != nullptr) {
+      // The task owns the bus and the key. All that is left here is turning the
+      // frames it captured into contact state, on the thread that queries it.
+      if (_gt911FrameOverflow) {
+        _gt911FrameOverflow = false;
+        // The stream is torn, so the contact in flight cannot be trusted: its
+        // down point, its slop history and its duration all came from frames
+        // that are partly missing. Suppressing it drops the gesture, which is
+        // the cheap failure; believing it would invent a tap or a swipe the
+        // finger never made.
+        touchSuppressed = true;
+      }
+      Gt911Frame queued;
+      while (xQueueReceive(_gt911FrameQueue, &queued, 0) == pdTRUE) {
+        gt911ApplyFrame(queued);
+      }
+    } else {
+      pollGt911(now);
+    }
   } else if (t.controller == BoardConfig::TouchController::Ft5x06) {
     pollFt5x06(now);
   } else if (t.controller == BoardConfig::TouchController::Ft6336u) {
@@ -2082,6 +2204,98 @@ bool InputManager::gt911ReadFrame(Gt911Frame& frame) {
   return true;
 }
 
+namespace {
+// A sampler that stalled longer than this cannot be trusted about the level it
+// last saw: the key may have been released and re-pressed behind the gap, and
+// the controller discards everything behind an unacknowledged frame. Believing
+// the stale level is how a missed release becomes a phantom long press seconds
+// later (measured 2026-09-05: a double tap lit the frontlight once the map had
+// finished rendering). 100 ms is ten controller frames -- far beyond any real
+// sampling jitter, far below the 700 ms hold.
+constexpr unsigned long kKeyGapCancelMs = 100;
+}  // namespace
+
+void InputManager::gt911PushKeyGesture(const uint8_t gesture, const unsigned long now) {
+  if (_gt911GestureQueue == nullptr) {
+    // No task: deliver straight into the one-shot flags, which is what the
+    // synchronous path has always done.
+    switch (static_cast<HomeKeyGesture>(gesture)) {
+      case HomeKeyGesture::Press:     touchHomeKeyEvent = true; break;
+      case HomeKeyGesture::Tap:       touchHomeKeyTapEvent = true; break;
+      case HomeKeyGesture::DoubleTap: touchHomeKeyDoubleTapEvent = true; break;
+      case HomeKeyGesture::LongPress: touchHomeKeyLongEvent = true; break;
+      case HomeKeyGesture::Cancel:    break;  // nothing to retract in the flags
+    }
+    return;
+  }
+  (void)now;
+  xQueueSend(_gt911GestureQueue, &gesture, 0);
+}
+
+void InputManager::gt911RecogniseKey(const unsigned long now, const bool frameReady, const bool keyDown) {
+  // The gap rule comes first: everything below reasons from a level, and after a
+  // stall the level is not evidence. Dropping a gesture is the cheap failure;
+  // inventing one costs a 1-2 s panel refresh.
+  if (keyLastTickAt != 0 && now - keyLastTickAt > kKeyGapCancelMs) {
+    if (touchHomeKeyDown || keyPendingTapAt != 0) gt911PushKeyGesture(static_cast<uint8_t>(HomeKeyGesture::Cancel), now);
+    touchHomeKeyDown = false;
+    touchHomeKeyLongFired = false;
+    keyPendingTapAt = 0;
+    keySwallowRelease = false;
+  }
+  keyLastTickAt = now;
+
+  // The hold, timed from the latched down-state rather than from frames: a held
+  // key produces NO frames at all on this controller (measured -- one frame at
+  // the press, then silence for the whole 60-90 ms hold), so a frame-gated timer
+  // could never cross the threshold.
+  if (touchHomeKeyDown && !touchHomeKeyLongFired && now - touchHomeKeyDownAt >= homeKeySpec.longMs) {
+    touchHomeKeyLongFired = true;  // once per hold; also suppresses the release tap
+    keyPendingTapAt = 0;
+    gt911PushKeyGesture(static_cast<uint8_t>(HomeKeyGesture::LongPress), now);
+  }
+
+  // A tap held back to see whether a second one follows, now out of time. It is
+  // emitted with the timestamp of the RELEASE that made it, not of the moment it
+  // expired, so a consumer that reads timestamps sees the finger's timing.
+  if (keyPendingTapAt != 0 && now - keyPendingTapAt >= homeKeySpec.doubleWindowMs) {
+    gt911PushKeyGesture(static_cast<uint8_t>(HomeKeyGesture::Tap), keyPendingTapAt);
+    keyPendingTapAt = 0;
+  }
+
+  if (!frameReady) return;
+
+  if (keyDown && !touchHomeKeyDown) {  // press edge
+    touchHomeKeyDownAt = now;
+    touchHomeKeyLongFired = false;
+    const bool completesDouble = keyPendingTapAt != 0 && now - keyPendingTapAt >= homeKeySpec.minInterTapMs;
+    gt911PushKeyGesture(static_cast<uint8_t>(HomeKeyGesture::Press), now);
+    if (completesDouble) {
+      // Fired on the second PRESS, the way Android decides it
+      // (GestureDetector::isConsideredDoubleTap compares secondDown to firstUp),
+      // because waiting for the second release would add its whole duration to a
+      // gesture the rider has already finished expressing.
+      keyPendingTapAt = 0;
+      keySwallowRelease = true;
+      gt911PushKeyGesture(static_cast<uint8_t>(HomeKeyGesture::DoubleTap), now);
+    }
+  } else if (!keyDown && touchHomeKeyDown) {  // release edge
+    if (keySwallowRelease) {
+      keySwallowRelease = false;
+    } else if (!touchHomeKeyLongFired) {
+      if (homeKeySpec.doubleWindowMs == 0) {
+        gt911PushKeyGesture(static_cast<uint8_t>(HomeKeyGesture::Tap), now);
+      } else {
+        keyPendingTapAt = now;
+        // millis() is 0 for one tick after boot and 0 is this field's "nothing
+        // waiting"; one tick later keeps the sentinel honest.
+        if (keyPendingTapAt == 0) keyPendingTapAt = 1;
+      }
+    }
+  }
+  touchHomeKeyDown = keyDown;
+}
+
 void InputManager::pollGt911(const unsigned long now) {
   Gt911Frame frame;
   if (!gt911ReadFrame(frame)) {
@@ -2095,6 +2309,8 @@ void InputManager::pollGt911(const unsigned long now) {
   // The synchronous path keeps its caller's clock, so nothing about timing
   // changes for a board that never starts the task.
   frame.timestamp = now;
+  const bool ready = (frame.status & 0x80) != 0;
+  gt911RecogniseKey(now, ready, (frame.status & 0x10) != 0);
   gt911ApplyFrame(frame);
 }
 
@@ -2103,31 +2319,14 @@ void InputManager::pollGt911(const unsigned long now) {
 void InputManager::gt911ApplyFrame(const Gt911Frame& frame) {
   const unsigned long now = frame.timestamp;
   const uint8_t status = frame.status;
-  // Capacitive home key long-press (status bit 0x10). Fire from the LATCHED
-  // down-state + wall clock, BEFORE the buffer-ready gate below: a motionless
-  // hold stops producing new-data frames (0x80 stays clear), so gating the hold
-  // timer on fresh frames would never let it cross the threshold. The
-  // press/release EDGES still come from fresh frames (handled after the gate).
-  if (touchHomeKeyDown && !touchHomeKeyLongFired && now - touchHomeKeyDownAt >= HOME_KEY_LONG_PRESS_MS) {
-    touchHomeKeyLongEvent = true;  // crossed the threshold (a hold shortcut)
-    touchHomeKeyLongFired = true;  // once per hold; also suppresses the release tap
-  }
-
+  // The key is not handled here. It is recognised wherever the READING happens
+  // (gt911RecogniseKey), because a recogniser fed on a stalled thread measures
+  // that thread's latency instead of the finger's timing. Contacts stay here:
+  // the glass is consumed as a live level and has to be interpreted next to the
+  // state the app queries.
   if (!(status & 0x80)) {  // buffer not ready
     return;
   }
-
-  // Home-key press/release edges (need a fresh frame). Short tap = primary
-  // "home" action, fires on release; the long hold above suppresses it.
-  const bool homeKeyDown = (status & 0x10) != 0;
-  if (homeKeyDown && !touchHomeKeyDown) {  // press edge
-    touchHomeKeyEvent = true;
-    touchHomeKeyDownAt = now;
-    touchHomeKeyLongFired = false;
-  } else if (!homeKeyDown && touchHomeKeyDown && !touchHomeKeyLongFired) {
-    touchHomeKeyTapEvent = true;  // release edge of a short press
-  }
-  touchHomeKeyDown = homeKeyDown;
 
   const uint8_t count = status & 0x0F;
   if (count > 0) {
