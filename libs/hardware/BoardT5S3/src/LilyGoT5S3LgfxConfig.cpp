@@ -353,25 +353,17 @@ const LgfxEpdConfig& lilygoT5S3LgfxConfig() {
       sizeof(kTextLut) / sizeof(kTextLut[0]),
       kFastLut,
       sizeof(kFastLut) / sizeof(kFastLut[0]),
-      // Back to the 1-bit probe, 2026-09-17, for the test the pre-drive claim
-      // has never actually had. That claim -- residue tracks pre-drive count --
-      // came from comparing tables one after another on a single panel, and
-      // from one side-by-side run whose two boards were drawing different maps
-      // because only one had tiles. With matched content and two boards, 11
-      // passes (two pre-drive) and the library's 8 (one) are indistinguishable
-      // after forty marker moves. So the ordering is unsupported at that end,
-      // and 7 passes with **no** pre-drive is the extreme that decides it.
+      // Null, so epd_fastest takes LovyanGFX's own lut_fastest: five drive rows
+      // with **one** opposite pre-drive pass, eight passes in total. This is the
+      // shipping fast table since 2026-09-17.
       //
-      // That middle table is the candidate the panel asked for on 2026-09-09.
-      // kFast1bitLut (below, kept for reference) dropped the pre-drive
-      // altogether for 7 passes and 875 ms a marker move, and the maintainer
-      // called its ghosting visible but acceptable -- until the control ran.
-      // kFastLut's 11 passes, with **two** pre-drive passes, ghosted almost
-      // not at all at 1,046 ms. So the pre-drive was never just the flash this
-      // work set out to remove; it is doing the residue work, and the question
-      // is how little of it suffices.
-      kFast1bitLut,
-      sizeof(kFast1bitLut) / sizeof(kFast1bitLut[0]),
+      // Settled on two boards with matched content, forty marker moves, never
+      // leaving the map: 11 passes (two pre-drive) and this one are
+      // indistinguishable; kFast1bitLut's 7 (none) shows visible ghosting. So
+      // one pre-drive pass is necessary and sufficient, and the pre-drive is a
+      // mini-erase rather than the flash it was first read as.
+      nullptr,
+      0,
   };
   return cfg;
 }
