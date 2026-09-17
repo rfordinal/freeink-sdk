@@ -10,6 +10,10 @@
 
 #include <FreeInkUI.h>
 
+#include <atomic>
+#include <memory>
+#include <new>
+
 namespace freeink {
 namespace ui {
 
@@ -60,6 +64,16 @@ public:
 
   void setContentMargin(Insets margin) {
     content_ = insetClamped(frame_.safeRect(), margin);
+  }
+  // Reserves chrome measured from the physical screen edges while preserving
+  // the device safe area. A reservation already covered by a safe-area inset
+  // does not inset the content a second time.
+  void setContentMarginFromScreen(Insets margin) {
+    const Insets safe = frame_.device().safeArea;
+    setContentMargin(Insets{marginBeyondSafeArea(margin.top, safe.top),
+                            marginBeyondSafeArea(margin.right, safe.right),
+                            marginBeyondSafeArea(margin.bottom, safe.bottom),
+                            marginBeyondSafeArea(margin.left, safe.left)});
   }
   void insetContent(Insets margin) {
     content_ = insetClamped(content_, margin);
@@ -310,6 +324,104 @@ public:
         props);
   }
 
+  void capsuleSlider(const CapsuleSliderProps &props, int16_t height = 0,
+                     LayoutAnchor anchor = LayoutAnchor::Top) {
+    CapsuleSliderProps themed = props;
+    if (themed.radius == RADIUS_INHERIT)
+      themed.radius = theme_.capsuleRadius;
+    ui::capsuleSlider(
+        frame_,
+        take(anchor, height > 0 ? height : theme_.rowHeight, theme_.spaceSm),
+        themed);
+  }
+
+  // Caption + [-] [capsule] [+] band. controlHeight sizes the control band
+  // (0 = finger-sized, derived from the theme's touch target); the caption
+  // line comes from the label font, so the whole row is reserved here.
+  void sliderRow(const SliderRowProps &props, int16_t controlHeight = 0,
+                 LayoutAnchor anchor = LayoutAnchor::Top) {
+    SliderRowProps themed = props;
+    if (textStyleUnset(themed.labelText)) {
+      themed.labelText = theme_.smallText;
+      themed.labelText.bold = true;
+    }
+    if (textStyleUnset(themed.valueText))
+      themed.valueText = theme_.smallText;
+    if (textStyleUnset(themed.buttonText)) {
+      themed.buttonText = theme_.titleText;
+      themed.buttonText.bold = true;
+    }
+    themed.captionGap = theme_.spaceMd;
+    themed.gap = theme_.spaceMd;
+    if (themed.buttonRadius == RADIUS_INHERIT)
+      themed.buttonRadius = theme_.controlRadius;
+    if (themed.capsuleRadius == RADIUS_INHERIT)
+      themed.capsuleRadius = theme_.capsuleRadius;
+    if (controlHeight <= 0)
+      controlHeight = static_cast<int16_t>(theme_.minTouchSize + 12);
+    ui::sliderRow(
+        frame_,
+        take(anchor, sliderRowHeight(frame_.target(), themed, controlHeight),
+             theme_.spaceMd),
+        themed);
+  }
+
+  // Quick-setting tile grid. Reserves exactly the rows the items need;
+  // tileHeight 0 = two stacked touch targets per tile (a roomy card).
+  void tileGrid(const TileGridProps &props,
+                LayoutAnchor anchor = LayoutAnchor::Top) {
+    TileGridProps themed = props;
+    if (textStyleUnset(themed.text))
+      themed.text = theme_.smallText;
+    if (themed.radius == RADIUS_INHERIT)
+      themed.radius = theme_.controlRadius;
+    if (themed.tileHeight <= 0)
+      themed.tileHeight = static_cast<int16_t>(theme_.minTouchSize * 2 - 4);
+    ui::tileGrid(frame_,
+                 take(anchor,
+                      tileGridHeight(themed.count, themed.columns,
+                                     themed.tileHeight, themed.gap),
+                      theme_.spaceSm),
+                 themed);
+  }
+
+  // Sheet chrome over the first height pixels of the screen (or the last, for
+  // a bottom sheet). Constrains the content area to the sheet's usable part
+  // so subsequent takeTop() calls lay out inside it; returns that rect.
+  Rect sheet(const SheetProps &props, int16_t height) {
+    SheetProps themed = props;
+    if (themed.radius == RADIUS_INHERIT)
+      themed.radius = theme_.sheetRadius;
+    // A sheet is an edge overlay: draw its body FULL-BLEED to the screen edge so it
+    // covers the bezel/status area (nothing behind it peeks out at the anchored
+    // edge). Only the ANCHORED edge bleeds out; the free edge (and its grabber)
+    // stays at the safe-area position `height` describes, so we grow the body by
+    // the anchored-edge inset rather than shifting it. Content is still clamped to
+    // the safe area below, so rows clear the rounded corners.
+    const Rect full = frame_.device().screen();
+    const Rect safe = frame_.safeRect();
+    const int16_t topInset =
+        safe.y > full.y ? static_cast<int16_t>(safe.y - full.y) : 0;
+    const int16_t bottomInset =
+        full.bottom() > safe.bottom() ? static_cast<int16_t>(full.bottom() - safe.bottom()) : 0;
+    const Rect rect =
+        themed.anchor == SheetEdge::Top
+            ? Rect{full.x, full.y, full.width, static_cast<int16_t>(height + topInset)}
+            : Rect{full.x, static_cast<int16_t>(full.bottom() - height - bottomInset),
+                   full.width, static_cast<int16_t>(height + bottomInset)};
+    ui::sheet(frame_, rect, themed);
+    const Rect content = sheetContentRect(rect, themed);
+    // setContentMargin() insets from safeRect, so content already clears the side
+    // bezel; here we only push it to the sheet's content band vertically.
+    const int16_t topMargin =
+        content.y > safe.y ? static_cast<int16_t>(content.y - safe.y) : 0;
+    const int16_t bottomMargin = safe.bottom() > content.bottom()
+                                     ? static_cast<int16_t>(safe.bottom() - content.bottom())
+                                     : 0;
+    setContentMargin(Insets{topMargin, 0, bottomMargin, 0});
+    return body();
+  }
+
   void dropdown(const DropdownProps &props,
                 LayoutAnchor anchor = LayoutAnchor::Top) {
     ui::dropdown(frame_, take(anchor, theme_.rowHeight, theme_.spaceSm), props);
@@ -543,6 +655,11 @@ private:
                 static_cast<int16_t>(bottom - y)};
   }
 
+  static int16_t marginBeyondSafeArea(const int16_t margin,
+                                      const int16_t safeInset) {
+    return margin > safeInset ? static_cast<int16_t>(margin - safeInset) : 0;
+  }
+
   FrameType &frame_;
   const ThemeTokens &theme_;
   Rect content_{};
@@ -560,16 +677,52 @@ public:
       : target_(target), device_(device), assets_(assets) {
     // Size the default metric tokens to the target's actual body font: the
     // static 44px defaults fit ~18px UI fonts but clip label+subtitle rows
-    // with larger fonts (the bundled Noto Sans is 34px/line). setTheme()
-    // still replaces everything.
-    theme_ = themeTokensForLineHeight(target.lineHeight(theme_.bodyText.font));
+    // with larger fonts (the bundled Noto Sans is 34px/line). setTheme() /
+    // setThemeRef() still replace everything.
+    ownedTheme_.reset(new (std::nothrow) ThemeTokens(
+        themeTokensForLineHeight(target.lineHeight(TextStyle{}.font))));
   }
 
   void setDevice(DeviceContext device) { device_ = device; }
   const DeviceContext &device() const { return device_; }
 
-  void setTheme(const ThemeTokens &theme) { theme_ = theme; }
-  const ThemeTokens &theme() const { return theme_; }
+  // Copy mode: the app keeps its own (heap-owned) tokens.
+  void setTheme(const ThemeTokens &theme) {
+    sharedThemeRef_ = nullptr;
+    if (ownedTheme_) {
+      *ownedTheme_ = theme;
+    } else {
+      ownedTheme_.reset(new (std::nothrow) ThemeTokens(theme));
+    }
+  }
+  // Shared mode: dereference caller-owned tokens through a caller-owned
+  // atomic cell (both must outlive the app). Tokens are usually identical
+  // for every screen of an app, so sharing one instance saves the ~1.5KB
+  // per-app copy setTheme() keeps — on small heaps that copy per live screen
+  // is the cost that matters. Passing nullptr reverts to the owned/default
+  // tokens.
+  //
+  // The indirection (a pointer to an atomic pointer, not a plain pointer) is
+  // deliberate: a caller can atomically swap which ThemeTokens instance the
+  // cell points at (write a new one into a fresh, not-currently-referenced
+  // instance, then one atomic store) so every app sharing that cell picks up
+  // the change on its next theme() call without ever dereferencing an
+  // instance that's mid-overwrite. Overwriting a single shared ThemeTokens
+  // in place instead (the old setThemeRef(const ThemeTokens*) contract) let
+  // a render task reading theme().rowHeight/etc. field-by-field observe a
+  // torn mix of old and new fields if a theme change landed mid-read.
+  void setThemeRef(const std::atomic<const ThemeTokens *> *themeRef) {
+    sharedThemeRef_ = themeRef;
+    if (themeRef) ownedTheme_.reset();
+  }
+  const ThemeTokens &theme() const {
+    if (sharedThemeRef_) {
+      const ThemeTokens *t = sharedThemeRef_->load(std::memory_order_acquire);
+      if (t) return *t;
+    }
+    if (ownedTheme_) return *ownedTheme_;
+    return FALLBACK_THEME_TOKENS;  // owned-copy allocation failed
+  }
 
   void setAssets(AssetResolver *assets) { assets_ = assets; }
   AssetResolver *assets() const { return assets_; }
@@ -650,12 +803,18 @@ public:
     if (clearBeforePaint_)
       target_.fill(device_.screen(), clearPaint_);
 
+    // Build into whichever interaction-table generation isn't currently
+    // published, so route() below (possibly running on another task right
+    // now) never reads one mid-rebuild — see InteractionBuffer's
+    // beginPublishCycle()/publish().
+    interactions_.beginPublishCycle();
     Frame<MaxInteractions> frame(target_, device_, input, interactions_,
                                  assets_);
-    ScreenType screen(frame, theme_);
+    ScreenType screen(frame, theme());
     if (screen_)
       screen_(screen, screenUser_);
     lastEvent_ = frame.finish();
+    interactions_.publish();
     if (lastEvent_) {
       dispatch(lastEvent_);
       invalidate(RefreshHint::Fast);
@@ -681,7 +840,9 @@ public:
   // remaining queued taps route against the old screen — same as taps landing
   // just before a transition).
   ActionEvent route(const InputSnapshot &input) {
-    lastEvent_ = interactions_.route(input);
+    // Reads the last-published table (see render()'s beginPublishCycle()/
+    // publish()), never one a concurrent render is mid-rebuilding.
+    lastEvent_ = interactions_.routePublished(input);
     if (lastEvent_) {
       flashSuppressed_ = false;
       dispatch(lastEvent_);
@@ -727,7 +888,12 @@ private:
 
   DrawTarget &target_;
   DeviceContext device_{};
-  ThemeTokens theme_ = defaultThemeTokens();
+  // Theme storage: caller-owned shared tokens (setThemeRef) or an app-owned
+  // heap copy (setTheme / the constructor's font-derived default). A pointer
+  // pair instead of an inline ThemeTokens member keeps sizeof(FreeInkApp)
+  // small — the tokens are ~1.5KB and most apps share one instance.
+  const std::atomic<const ThemeTokens *> *sharedThemeRef_ = nullptr;
+  std::unique_ptr<ThemeTokens> ownedTheme_;
   AssetResolver *assets_ = nullptr;
   InteractionBuffer<MaxInteractions> interactions_{};
   ScreenFn screen_ = nullptr;

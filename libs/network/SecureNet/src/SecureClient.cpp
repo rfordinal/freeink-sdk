@@ -67,6 +67,8 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
 #endif
   const uint32_t started = millis();
   stop();
+  const uint32_t timeoutMs = getTimeout();
+  _transport.setConnectionTimeout(timeoutMs);
   if (!_transport.connect(host, port)) {
     if (Serial) Serial.printf("[SecureClient] TCP connect failed (%s): %s:%u\n", label, host, port);
     return 0;
@@ -109,11 +111,20 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
   // with a HelloRetryRequest and wolfSSL falls back to its group list.
   wolfSSL_UseKeyShare(ssl, WOLFSSL_ECC_X25519);
 #endif
+#ifdef HAVE_MAX_FRAGMENT
+  // Ask the peer to cap TLS records at 2KB (RFC 6066 max_fragment_length).
+  // wolfSSL sizes its receive buffer to each incoming record, so a default
+  // 16KB record demands a ~17KB contiguous allocation per record -- measured
+  // failing (MEMORY_E mid-download) at the ~20KB free heap a busy activity
+  // leaves. With 2KB records the receive buffer stays trivial. Servers that
+  // ignore the extension keep 16KB records and behave as before.
+  wolfSSL_UseMaxFragment(ssl, WOLFSSL_MFL_2_11);
+#endif
 
   // The recv callback is non-blocking (returns WANT_READ when no bytes are
   // buffered), so wolfSSL_connect must be retried across handshake round-trips
   // rather than called once.
-  const uint32_t deadline = millis() + 15000;
+  const uint32_t deadline = millis() + timeoutMs;
   int ret;
   while ((ret = wolfSSL_connect(ssl)) != WOLFSSL_SUCCESS) {
     const int err = wolfSSL_get_error(ssl, ret);
@@ -178,6 +189,10 @@ int SecureClient::read(uint8_t* buf, size_t size) {
     _connected = false;
     return 0;
   }
+  // A mid-stream failure is invisible to callers (they just see the connection
+  // die); the error code distinguishes an OOM (MEMORY_E -125) from a peer
+  // drop or MAC failure.
+  if (Serial) Serial.printf("[SecureClient] read failed: %d, free heap %u\n", err, (unsigned)ESP.getFreeHeap());
   _connected = false;
   return -1;
 }

@@ -37,9 +37,38 @@ class FreeInkDisplay {
   // M5 PaperColor: run the next refresh's OTP waveform to completion (one-shot).
   void requestCompleteWaveformNextRefresh();
 
+  // M5 PaperColor: make every FULL_REFRESH run the complete OTP waveform
+  // (~15 s, DC-balanced, true white, full color) instead of an interrupted
+  // full-panel pass. For consumers whose Full refreshes are all standing
+  // images (clock/dashboard apps); readers that page with Full keep the
+  // default (off). No-op on other panels.
+  void setFullRefreshCompletesWaveform(bool enabled);
+
+  // M5 PaperColor (Spectra-6) accent color planes: 1-bit buffers with the
+  // framebuffer's geometry/layout. A set bit recolors that pixel's ink (a
+  // 0/black framebuffer bit) to the slot's `colorCode` on complete-waveform
+  // refreshes; interrupted refreshes render it as plain ink (color pigments
+  // never settle in a cut-off waveform), so accents appear only on standing
+  // images. Up to 4 slots — the lowest slot with a set bit wins on overlap;
+  // nullptr clears a slot; the caller owns the buffers. No-op on other panels.
+  void setAccentPlaneSlot(uint8_t slot, const uint8_t* plane, uint8_t colorCode);
+  // ED2208 Spectra-6 controller color codes for setAccentPlaneSlot().
+  static constexpr uint8_t SPECTRA_BLACK = 0x0;
+  static constexpr uint8_t SPECTRA_WHITE = 0x1;
+  static constexpr uint8_t SPECTRA_YELLOW = 0x2;
+  static constexpr uint8_t SPECTRA_RED = 0x3;
+  static constexpr uint8_t SPECTRA_BLUE = 0x5;
+  static constexpr uint8_t SPECTRA_GREEN = 0x6;
+
   // M5 PaperColor: interrupted-refresh cutoff (ms). The cut freezes the gate
   void setFastRefreshCutoffMs(uint16_t ms);
   uint16_t fastRefreshCutoffMs() const;
+
+  // Hold the periodic anti-ghost full refresh through a live interaction (slider
+  // drag): while held, fast refreshes are never promoted to a full. Clear it and
+  // force one full afterward to scrub any ghost. No-op on panels without the
+  // periodic-full cadence (currently the EEGO A4's UC8279C driver).
+  void setHoldPeriodicFullRefresh(bool hold);
 
   void begin();
 
@@ -97,7 +126,12 @@ class FreeInkDisplay {
   void copyGrayscaleMsbBuffers(const uint8_t* msbBuffer);
   enum GrayPlane { GRAY_PLANE_LSB, GRAY_PLANE_MSB };
   void writeGrayscalePlaneStrip(GrayPlane plane, const uint8_t* rows, uint16_t yStart, uint16_t numRows);
+  bool supportsBusyGrayscaleStaging() const;
+  void prepareGrayscaleTarget();
   bool supportsStripGrayscale() const;
+  // True when displayGrayscaleBase() defers the base activation so the gray
+  // planes join it in one waveform (Paper Mono) - see PanelDriver.
+  bool combinesGrayscaleBase() const;
   // Restore controller RAM and frameBuffer to the given BW baseline after
   // grayscale. Available in both buffer modes (CrossPoint's dual-buffer HAL
   // wraps it directly).
@@ -216,12 +250,23 @@ class FreeInkDisplay {
   // EXPERIMENTAL: Windowed update - display only a rectangular region
   void displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen = false);
   void displayGrayBuffer(bool turnOffScreen = false, const unsigned char* lut = nullptr, bool factoryMode = false);
+  void displayGrayCalibration(uint16_t customX, uint16_t customY, uint16_t customW, uint16_t customH);
 
   void refreshDisplay(RefreshMode mode = FAST_REFRESH, bool turnOffScreen = false);
 
   // Hint the X3 policy to run a one-shot full resync on next update.
   void requestResync(uint8_t settlePasses = 0);
   void skipInitialResync();
+  void beginDisplayWork();
+  void abortPostRefresh();
+  bool postRefreshAborted() const;
+  // True when the last display sequence actually reached the panel. Panels
+  // which paint synchronously always report true, so refresh-cadence callers
+  // behave exactly as before on them.
+  bool displayCommitted() const;
+  void runMaintenance();
+  bool hasPendingMaintenance() const;
+  void controllerIdle();
 
   // debug function
   void grayscaleRevert();
@@ -332,6 +377,10 @@ class FreeInkDisplay {
 
  private:
   void selectDriver();
+  // Shared body of drawImage()/drawImageTransparent(). transparent=true ANDs
+  // (black-only); false overwrites. Handles non-byte-aligned x per-pixel.
+  void blitImage(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool fromProgmem,
+                 bool transparent) const;
   // Block until a pending async refresh completes (no-op when none is).
   // Every blocking panel operation calls this before touching the bus.
   void syncPendingAsync();

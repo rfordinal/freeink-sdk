@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <BoardConfig.h>
+#include <driver/gpio.h>
 #include <esp_sleep.h>
 #include <soc/soc_caps.h>
 
@@ -72,6 +73,15 @@ void holdRailOff(int8_t pin, uint8_t offLevel) {
 
 void PowerManager::powerDownRailsForSleep() {
   const auto& b = BoardConfig::ACTIVE;
+  // Keep RESET defined through deep sleep, but never drive an unpowered panel's
+  // input HIGH: on boards with a gated EPD rail (Sticky), that can back-power the
+  // controller through its RESET protection diode and turn sleep into a
+  // milliamp-level drain. Hold RESET LOW alongside a switched-off rail. Boards
+  // whose panel rail remains powered (X4 Pro) keep RESET HIGH so a UC8179 cannot
+  // drift out of DSLP and restart its analog booster. EpdBus and XteinkDetect
+  // release the hold before issuing a reset pulse on wake.
+  const uint8_t resetSleepLevel = b.display.powerEnable >= 0 ? LOW : HIGH;
+  holdRailOff(b.display.rst, resetSleepLevel);
   holdRailOff(b.display.powerEnable, LOW);
   // SD enable OFF = the inactive level: LOW for active-high enables, HIGH for the
   // active-low ones (e.g. X4 Pro's GPIO5, which powers the card while held LOW).
@@ -83,7 +93,9 @@ void PowerManager::powerDownRailsForSleep() {
 
 void PowerManager::deepSleep() {
   esp_sleep_config_gpio_isolate();
+#if !FREEINK_MCU_C61
   gpio_deep_sleep_hold_en();
+#endif
   esp_deep_sleep_start();
   while (true) {
   }  // esp_deep_sleep_start() does not return; satisfy [[noreturn]]
