@@ -55,7 +55,7 @@ constexpr uint32_t kFastLut[] = {
 // four is a deliberate probe below that, not a safe default. Compare against
 // kFastLut and the library's own lut_fastest before adopting it -- CMD:EPDLUT
 // switches between the three at runtime.
-[[maybe_unused]] constexpr uint32_t kFast1bitLut[] = {
+constexpr uint32_t kFast1bitLut[] = {
     LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
     LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
     LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
@@ -353,9 +353,14 @@ const LgfxEpdConfig& lilygoT5S3LgfxConfig() {
       sizeof(kTextLut) / sizeof(kTextLut[0]),
       kFastLut,
       sizeof(kFastLut) / sizeof(kFastLut[0]),
-      // Left null on purpose, so epd_fastest falls through to LovyanGFX's own
-      // lut_fastest: 5 drive rows with **one** opposite pre-drive pass, 8
-      // passes in total.
+      // Back to the 1-bit probe, 2026-09-17, for the test the pre-drive claim
+      // has never actually had. That claim -- residue tracks pre-drive count --
+      // came from comparing tables one after another on a single panel, and
+      // from one side-by-side run whose two boards were drawing different maps
+      // because only one had tiles. With matched content and two boards, 11
+      // passes (two pre-drive) and the library's 8 (one) are indistinguishable
+      // after forty marker moves. So the ordering is unsupported at that end,
+      // and 7 passes with **no** pre-drive is the extreme that decides it.
       //
       // That middle table is the candidate the panel asked for on 2026-09-09.
       // kFast1bitLut (below, kept for reference) dropped the pre-drive
@@ -365,8 +370,8 @@ const LgfxEpdConfig& lilygoT5S3LgfxConfig() {
       // not at all at 1,046 ms. So the pre-drive was never just the flash this
       // work set out to remove; it is doing the residue work, and the question
       // is how little of it suffices.
-      nullptr,
-      0,
+      kFast1bitLut,
+      sizeof(kFast1bitLut) / sizeof(kFast1bitLut[0]),
   };
   return cfg;
 }
