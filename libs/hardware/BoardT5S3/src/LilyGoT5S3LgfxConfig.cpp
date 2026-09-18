@@ -23,7 +23,7 @@ constexpr uint8_t kTpsEnableOutputs = 0x3F;
 // "swipe"). Using one LUT under one mode keeps unchanged pixels skipped.
 // Columns 0/15 carry the default lut_fast drive (changed B/W text pixels);
 // columns 1-6 / 9-14 carry the AA nudge for the gray levels AA produces.
-constexpr uint32_t kFastLut[] = {
+[[maybe_unused]] constexpr uint32_t kFastLut[] = {
     LUT_MAKE(2, 1, 1, 1, 1, 1, 1, 3, 3, 2, 2, 2, 2, 2, 2, 1),
     LUT_MAKE(2, 3, 1, 1, 1, 1, 3, 3, 3, 3, 2, 2, 2, 2, 3, 1),
     LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
@@ -351,17 +351,18 @@ const LgfxEpdConfig& lilygoT5S3LgfxConfig() {
       0,
       kTextLut,
       sizeof(kTextLut) / sizeof(kTextLut[0]),
-      kFastLut,
-      sizeof(kFastLut) / sizeof(kFastLut[0]),
-      // Null, so epd_fastest takes LovyanGFX's own lut_fastest: five drive rows
-      // with **one** opposite pre-drive pass, eight passes in total. This is the
-      // shipping fast table since 2026-09-17.
-      //
-      // Settled on two boards with matched content, forty marker moves, never
-      // leaving the map: 11 passes (two pre-drive) and this one are
-      // indistinguishable; kFast1bitLut's 7 (none) shows visible ghosting. So
-      // one pre-drive pass is necessary and sufficient, and the pre-drive is a
-      // mini-erase rather than the flash it was first read as.
+      // Null, so epd_fast takes LovyanGFX's own lut_fast. kFastLut is the same
+      // eleven passes and differs only in its two pre-drive rows, which drive
+      // the greys where the library drives only black and white. That
+      // difference has never been judged against stock on a full-screen solid,
+      // and on 2026-09-18 that is exactly the surface that caught epd_fastest
+      // out, so the override goes away until something prices it.
+      nullptr,
+      0,
+      // Null, so epd_fastest takes LovyanGFX's own lut_fastest. Reachable
+      // through CMD:EPDLUT 1, and **not** the shipping mode: it shipped for one
+      // day and left the sleep screen's logo as a watermark over Home.
+      // LgfxEpdDriver.cpp's g_fastMode carries the reasoning.
       nullptr,
       0,
   };

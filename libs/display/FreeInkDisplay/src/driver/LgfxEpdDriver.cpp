@@ -110,8 +110,25 @@ FreeInkLgfxEpd g_dev;
 // Which epd_mode the non-clean path uses. epd_fast carries the old 11-pass
 // table, epd_fastest the 7-pass 1-bit one.
 //
-// **epd_fastest since 2026-09-17**, the library's 8-pass table with one
-// opposite pre-drive pass, settled on two boards rather than one.
+// **Back to epd_fast on 2026-09-18**, which is the stock mode. epd_fastest
+// shipped for one day and had to come back: it left the sleep screen's logo as
+// a watermark over the Home menu, and a board on stock beside it did not.
+//
+// The path explains it. Sleep is a real `esp_deep_sleep_start`, so waking is a
+// reboot: the framebuffer is gone and the per-pixel diff below has nothing to
+// compare against. What decides the ghost is therefore how deeply the sleep
+// screen itself was driven, and that draw goes down this fast path. Five drive
+// rows leave a full-screen solid part-driven, and the clean frame after the
+// wake does not lift it. Eight rows do.
+//
+// Forty marker moves never caught it because the map is thin lines. **A fast
+// table is judged on a full-screen solid, not on a map**, and the surface that
+// shows it is sleep to Home.
+//
+// A second consequence: a runtime knob cannot test this path at all, because
+// the wake reboots past whatever it set. Trying epd_fastest again costs a
+// build, not a serial line.
+//
 // The timings were real -- a marker move drops 1,046 -> 875 ms at 7 passes, the
 // scan 474 -> 302, and prep does not move (572 against 573 ms) -- but a
 // twenty-move soak on a dithered map showed the cost:
@@ -136,7 +153,7 @@ FreeInkLgfxEpd g_dev;
 // pixel + (lut_offset << 8) per pixel, so a mode change makes every stored value
 // mismatch and the whole screen is re-driven once. The frame straight after a
 // switch flashes and is not a valid timing sample.
-lgfx::epd_mode::epd_mode_t g_fastMode = lgfx::epd_mode::epd_fastest;
+lgfx::epd_mode::epd_mode_t g_fastMode = lgfx::epd_mode::epd_fast;
 
 lgfx::epd_mode::epd_mode_t epdModeFor(RefreshMode m) {
   switch (m) {
