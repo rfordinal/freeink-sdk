@@ -114,16 +114,17 @@ FreeInkLgfxEpd g_dev;
 // shipped for one day and had to come back: it left the sleep screen's logo as
 // a watermark over the Home menu, and a board on stock beside it did not.
 //
-// The path explains it. Sleep is a real `esp_deep_sleep_start`, so waking is a
-// reboot: the framebuffer is gone and the per-pixel diff below has nothing to
-// compare against. What decides the ghost is therefore how deeply the sleep
-// screen itself was driven, and that draw goes down this fast path. Five drive
-// rows leave a full-screen solid part-driven, and the clean frame after the
-// wake does not lift it. Eight rows do.
+// **The sleep screen is not drawn here.** SleepActivity calls
+// displayBuffer(HALF_REFRESH) over an inverted canvas, so `epd_text`'s twelve
+// drive rows lay a near-full-screen dark field, and that field sits on the
+// glass for the whole sleep. This path is what has to lift it afterwards: the
+// wake is a reboot, so the per-pixel diff below has nothing to compare against
+// and every pixel is re-driven, and both BootActivity and HomeActivity take the
+// FAST_REFRESH default. Five drive rows do not lift that field. Eight do.
 //
-// Forty marker moves never caught it because the map is thin lines. **A fast
-// table is judged on a full-screen solid, not on a map**, and the surface that
-// shows it is sleep to Home.
+// **So the table selected here is judged on erasing a full-screen solid, not on
+// a marker move.** Forty marker moves never caught this because a map is thin
+// lines, and thin lines are easy to erase.
 //
 // A second consequence: a runtime knob cannot test this path at all, because
 // the wake reboots past whatever it set. Trying epd_fastest again costs a
