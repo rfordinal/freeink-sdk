@@ -216,6 +216,13 @@ class InputManager {
     uint32_t produced;    // gestures the recogniser emitted
     uint32_t delivered;   // gestures update() handed to the app
     uint32_t queueDrops;  // gestures lost because the queue was full
+    // Split by type, because the total cannot answer the question that matters
+    // when a gesture comes out wrong: did the recogniser fail to see a double
+    // tap, or did it see one and something above mishandled it? A lump sum makes
+    // those two indistinguishable and the difference is where the bug lives.
+    uint32_t taps;
+    uint32_t doubleTaps;
+    uint32_t longPresses;
   };
   HomeKeyCounters homeKeyCounters(bool reset);
 
@@ -530,6 +537,9 @@ class InputManager {
   volatile uint32_t _keyProduced = 0;
   volatile uint32_t _keyDelivered = 0;
   volatile uint32_t _keyQueueDrops = 0;
+  volatile uint32_t _keyTaps = 0;
+  volatile uint32_t _keyDoubleTaps = 0;
+  volatile uint32_t _keyLongPresses = 0;
 
   // Recogniser state, written only where the reading happens.
   HomeKeyGestureSpec homeKeySpec{};

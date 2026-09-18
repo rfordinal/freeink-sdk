@@ -438,11 +438,14 @@ bool InputManager::wasHomeKeyDoubleTapped() const { return touchHomeKeyDoubleTap
 unsigned long InputManager::homeKeyEventAtMs() const { return touchHomeKeyEventAtMs; }
 
 InputManager::HomeKeyCounters InputManager::homeKeyCounters(const bool reset) {
-  HomeKeyCounters out{_keyProduced, _keyDelivered, _keyQueueDrops};
+  HomeKeyCounters out{_keyProduced, _keyDelivered, _keyQueueDrops, _keyTaps, _keyDoubleTaps, _keyLongPresses};
   if (reset) {
     _keyProduced = 0;
     _keyDelivered = 0;
     _keyQueueDrops = 0;
+    _keyTaps = 0;
+    _keyDoubleTaps = 0;
+    _keyLongPresses = 0;
   }
   return out;
 }
@@ -2342,6 +2345,12 @@ bool InputManager::gt911ReadFrame(Gt911Frame& frame) {
 
 void InputManager::gt911PushKeyGesture(const uint8_t gesture, const unsigned long now) {
   ++_keyProduced;
+  switch (static_cast<HomeKeyGesture>(gesture)) {
+    case HomeKeyGesture::Tap:       ++_keyTaps; break;
+    case HomeKeyGesture::DoubleTap: ++_keyDoubleTaps; break;
+    case HomeKeyGesture::LongPress: ++_keyLongPresses; break;
+    default: break;
+  }
   if (_gt911GestureQueue == nullptr) {
     touchHomeKeyEventAtMs = now;
     ++_keyDelivered;
