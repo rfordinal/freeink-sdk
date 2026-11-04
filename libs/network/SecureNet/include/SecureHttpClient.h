@@ -492,6 +492,24 @@ class SecureHttpClient {
           return true;
         }
         if (line.size() >= MAX_LINE) return false;
+        // MAX_LINE caps the LENGTH; it does not cap what the allocator is
+        // asked for. std::string grows by doubling, so a line nearing the cap
+        // demands roughly 2*MAX_LINE contiguous bytes -- and on a fragmented
+        // heap that throws std::bad_alloc, which under -fno-exceptions is
+        // abort(), not an error the caller can handle.
+        //
+        // Measured on an X3, 2026-11-04: a header line reached 3,840 bytes --
+        // still under the 4,096 cap -- and push_back asked for
+        // operator new(7681). It threw and the device went down
+        // (docs/crashes/2026-11-04-x3-ota-tls-reserve). The cap never got the
+        // chance to refuse the line.
+        //
+        // So once a line is clearly not an ordinary header, jump straight to
+        // the cap: peak demand becomes MAX_LINE instead of twice it, and the
+        // short lines that make up almost every response never pay for it.
+        // This lowers the peak; it does not make OOM survivable here, and
+        // nothing in this path can -- that needs a non-throwing string.
+        if (line.size() == LINE_RESERVE_AT) line.reserve(MAX_LINE);
         line += static_cast<char>(ch);
       }
       if (!c.connected() && c.available() == 0) return false;
@@ -568,6 +586,9 @@ class SecureHttpClient {
   // body readers, so kept modest.
   static constexpr size_t READ_CHUNK = 2048;
   static constexpr size_t MAX_LINE = 4096;  // header / chunk-size line cap
+  // Past this a line is no longer a normal header, so take the cap in one go
+  // rather than doubling into it. See readLine().
+  static constexpr size_t LINE_RESERVE_AT = 256;
 
   // Kept-alive connection state. _conn points at _secure or _plain while a
   // connection is held open, and null otherwise.
