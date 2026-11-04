@@ -5,6 +5,8 @@
 // integration point for the TLS 1.3 transport.
 #if defined(FREEINK_NET_WOLFSSL)
 #include <wolfssl/ssl.h>
+// ssl->max_fragment, to report whether the peer accepted the extension.
+#include <wolfssl/internal.h>
 #endif
 
 namespace freeink {
@@ -147,6 +149,21 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
   if (Serial) {
     Serial.printf("[SecureClient] handshake ok (%s): %s / %s in %lu ms\n", label, wolfSSL_get_version(ssl),
                   wolfSSL_get_cipher(ssl), (unsigned long)(millis() - started));
+#ifdef HAVE_MAX_FRAGMENT
+    // Whether the peer ACCEPTED max_fragment_length, which the request above
+    // only asks for. A server is free to ignore it and keep 16 KB records,
+    // and the whole point of asking is that a 16 KB record needs a ~17 KB
+    // contiguous allocation per record -- the failure this board actually
+    // hits. Reading it back turns "we asked" into "it took effect", and it
+    // is a yes/no from a single connection rather than something that needs
+    // a run of downloads to infer.
+    Serial.printf("[SecureClient] max_fragment: %u (MAX_RECORD_SIZE %u), free %u, maxAlloc %u\n",
+                  (unsigned)ssl->max_fragment, (unsigned)MAX_RECORD_SIZE, (unsigned)ESP.getFreeHeap(),
+                  (unsigned)ESP.getMaxAllocHeap());
+#else
+    Serial.printf("[SecureClient] max_fragment: NOT COMPILED IN, free %u, maxAlloc %u\n",
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+#endif
   }
   return 1;
 }
