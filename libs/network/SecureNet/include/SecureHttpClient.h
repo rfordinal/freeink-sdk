@@ -124,6 +124,11 @@ class SecureHttpClient {
     _headers.push_back(name + ": " + value + "\r\n");
   }
 
+  // Ask the TLS layer to hold one full-record buffer for this client's
+  // transfers. For bulk downloads on a board with no PSRAM; see
+  // SecureClient::reserveRecordBuffer().
+  void setReserveRecordBuffer(bool enabled) { _reserveRecordBuffer = enabled; }
+
   int GET() { return sendRequest("GET", nullptr, 0); }
   int GET(const DataCallback& onData, const AbortCallback& shouldAbort = nullptr) {
     return sendRequest("GET", nullptr, 0, onData, shouldAbort);
@@ -218,6 +223,13 @@ class SecureHttpClient {
         if (reusing && attempt == 0) continue;
         return -1;
       }
+
+      // The request string is built and freed by now and no body has arrived,
+      // so this is the widest the heap gets inside a request -- the one moment
+      // worth spending a 16 KB contiguous block on. See
+      // SecureClient::reserveRecordBuffer() for why a bulk download needs it
+      // at all. Opt-in, because a short request pays the block for nothing.
+      if (_reserveRecordBuffer && _connHttps) SecureClient::reserveRecordBuffer();
 
       const unsigned long headerDeadline = millis() + _timeoutMs;
       std::string line;
@@ -430,6 +442,10 @@ class SecureHttpClient {
   }
 
   void closeConnection() {
+    // Before the socket goes: if wolfSSL still holds the lent block the free
+    // is deferred inside SecureClient, so this is safe whatever the TLS layer
+    // is in the middle of.
+    SecureClient::releaseRecordBuffer();
     if (_conn) {
       _conn->stop();
       _conn = nullptr;
@@ -571,6 +587,10 @@ class SecureHttpClient {
 
   // Kept-alive connection state. _conn points at _secure or _plain while a
   // connection is held open, and null otherwise.
+  // Off by default: only a caller that knows it is pulling megabytes should
+  // tie up a 16 KB contiguous block for the length of the transfer.
+  bool _reserveRecordBuffer = false;
+
   WiFiClient _plain;
   SecureClient _secure;
   Client* _conn = nullptr;

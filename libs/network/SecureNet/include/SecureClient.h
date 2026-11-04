@@ -29,6 +29,38 @@ class SecureClient : public Client {
   SecureClient() = default;
   ~SecureClient() override;
 
+  // Lend wolfSSL one pre-allocated full-record buffer for the length of a bulk
+  // download, then take it back.
+  //
+  // WHY: a server that ignores max_fragment_length sends 16 KB TLS records.
+  // wolfSSL releases its grown input buffer after each record and asks for a
+  // fresh ~16.4 KB block for the next one, so a long download needs that block
+  // over and over. On a board with no PSRAM the heap is fragmented long before
+  // the transfer starts -- measured on an Xteink X3, 2026-11-04: 108 kB free on
+  // the home screen but a largest contiguous block of only 30.7 kB, and 27.6 kB
+  // once WiFi is up. A 4 MB firmware download died 61,810 bytes in with
+  // wolfSSL MEMORY_E.
+  //
+  // So: take the block ONCE, while a large one still exists, and hand it back
+  // to wolfSSL each time it asks for a record-sized allocation. The idea is
+  // upstream CrossPoint's (freeink-sdk 118c6723 and its follow-up 813a3c82);
+  // this is our own implementation of it against our pinned SDK.
+  //
+  // Call reserve() AFTER the request has been written, not right after the
+  // handshake: the request string is freed by then, and taking the big block
+  // first can make building that string fail instead -- std::string has no
+  // failure path under -fno-exceptions. That ordering is upstream's lesson,
+  // learned the expensive way.
+  //
+  // Returns false when the block could not be taken; the caller carries on
+  // unreserved, which is exactly today's behaviour. Safe to call when wolfSSL
+  // is compiled out: it does nothing and returns false.
+  static bool reserveRecordBuffer();
+  // Idempotent. If wolfSSL is still holding the buffer the free is deferred
+  // until it hands it back, so this can be called from a teardown path without
+  // knowing what the TLS layer is doing.
+  static void releaseRecordBuffer();
+
   // Certificate / verification configuration (applied before connect()).
   void setCACert(const char* rootCA);
   void setInsecure();  // skip peer verification (testing only)

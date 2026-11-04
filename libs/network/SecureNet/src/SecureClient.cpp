@@ -4,7 +4,14 @@
 // build free of the wolfSSL dependency while leaving a single, well-defined
 // integration point for the TLS 1.3 transport.
 #if defined(FREEINK_NET_WOLFSSL)
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <wolfssl/ssl.h>
+#include <wolfssl/wolfcrypt/memory.h>
+
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
 #endif
 
 namespace freeink {
@@ -23,6 +30,115 @@ void SecureClient::setCACert(const char* rootCA) { _rootCA = rootCA; }
 void SecureClient::setInsecure() { _insecure = true; }
 
 #if defined(FREEINK_NET_WOLFSSL)
+
+namespace {
+
+// --- the lent full-record buffer (see SecureClient::reserveRecordBuffer) ----
+//
+// 16,384 is the largest TLS record payload. The rest is what wolfSSL puts
+// around it before it asks the allocator: the 5-byte record header, the AEAD
+// tag, padding, and its own alignment slack. 320 bytes covers that with room
+// to spare -- upstream measured a real request of 16,406 bytes against a
+// largest free block of 16,372, which is how close this runs.
+constexpr size_t kRecordBufBytes = 16384 + 320;
+// Below this, an allocation is not a record and lending the one big block to
+// it would waste it. 1 KB rather than 4 KB because servers ramp record sizes
+// up: the first few records of a download are small and wolfSSL needs a
+// dynamic buffer for those too. Upstream raised exactly this threshold after
+// shipping 4 KB.
+constexpr size_t kLendFloor = 1024;
+
+std::atomic<void*> gBuf{nullptr};
+std::atomic<TaskHandle_t> gOwner{nullptr};
+std::atomic<bool> gLent{false};
+// Set when release() is called while wolfSSL still holds the block. The free
+// then happens in lendFree(), so a teardown path never has to know what the
+// TLS layer is doing.
+std::atomic<bool> gFreeWhenReturned{false};
+
+void* lendMalloc(size_t size) {
+  void* buf = gBuf.load();
+  bool notLent = false;
+  if (buf != nullptr && size > kLendFloor && size <= kRecordBufBytes &&
+      gOwner.load() == xTaskGetCurrentTaskHandle() && gLent.compare_exchange_strong(notLent, true)) {
+    return buf;
+  }
+  return malloc(size);
+}
+
+void lendFree(void* ptr) {
+  if (ptr != nullptr && ptr == gBuf.load()) {
+    if (gFreeWhenReturned.exchange(false)) {
+      gBuf = nullptr;
+      gOwner = nullptr;
+      free(ptr);
+    }
+    gLent = false;
+    return;
+  }
+  free(ptr);
+}
+
+void* lendRealloc(void* ptr, size_t size) {
+  if (ptr == nullptr || ptr != gBuf.load()) return realloc(ptr, size);
+  // Still fits: wolfSSL keeps using our block, nothing moves.
+  if (size <= kRecordBufBytes) return ptr;
+  // Outgrew it. Hand wolfSSL a real allocation and take our block back; on
+  // failure it keeps ours, which is the safe direction.
+  void* grown = malloc(size);
+  if (grown != nullptr) {
+    memcpy(grown, ptr, kRecordBufBytes);
+    gLent = false;
+  }
+  return grown;
+}
+
+}  // namespace
+
+bool SecureClient::reserveRecordBuffer() {
+  // Installed once per process. A failure here is silent loss of the whole
+  // point of this function, so say it out loud rather than degrading quietly.
+  static const bool hooked = [] {
+    const int rc = wolfSSL_SetAllocators(lendMalloc, lendFree, lendRealloc);
+    if (rc != 0 && Serial) {
+      Serial.printf("[SecureClient] wolfSSL_SetAllocators failed: %d -- downloads stay unreserved\n", rc);
+    }
+    return rc == 0;
+  }();
+  if (!hooked) return false;
+  // One reservation at a time. A second caller is refused rather than
+  // silently retargeting the owner, which would lend the block to a task that
+  // did not ask for it.
+  if (gBuf.load() != nullptr) return false;
+
+  void* buf = malloc(kRecordBufBytes);
+  if (buf == nullptr) {
+    if (Serial) {
+      Serial.printf("[SecureClient] no %u byte block to reserve, free heap %u\n", (unsigned)kRecordBufBytes,
+                    (unsigned)ESP.getFreeHeap());
+    }
+    return false;
+  }
+  gOwner = xTaskGetCurrentTaskHandle();
+  gFreeWhenReturned = false;
+  gLent = false;
+  gBuf = buf;
+  return true;
+}
+
+void SecureClient::releaseRecordBuffer() {
+  void* buf = gBuf.load();
+  if (buf == nullptr) return;
+  if (gLent.load()) {
+    // wolfSSL is using it right now; lendFree() will do the free.
+    gFreeWhenReturned = true;
+    return;
+  }
+  gBuf = nullptr;
+  gOwner = nullptr;
+  gFreeWhenReturned = false;
+  free(buf);
+}
 
 namespace {
 // Bridge wolfSSL's I/O to the underlying WiFiClient transport.
@@ -224,6 +340,9 @@ int SecureClient::read(uint8_t* buf, size_t size) { (void)buf; (void)size; retur
 int SecureClient::available() { return 0; }
 void SecureClient::stop() { _transport.stop(); _connected = false; }
 uint8_t SecureClient::connected() { return 0; }
+// Nothing to lend without a TLS stack. Callers check the bool and carry on.
+bool SecureClient::reserveRecordBuffer() { return false; }
+void SecureClient::releaseRecordBuffer() {}
 
 #endif
 
