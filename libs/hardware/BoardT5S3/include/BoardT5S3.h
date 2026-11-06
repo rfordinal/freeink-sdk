@@ -50,6 +50,17 @@ bool readTpsRegister8Public(uint8_t reg, uint8_t* value);
 // because the PMIC only answers I2C while the power sequence holds it awake --
 // a read outside a refresh fails with ESP_ERR_INVALID_STATE.
 void armTpsDump();
+
+// VADJ (TPS65185 register 0x02), the VPOS/VNEG source rails. 0 leaves the part
+// on its power-up value, which is what has always shipped -- nothing in this
+// firmware or upstream writes this register. Any other code is programmed on
+// the next epdPowerOn() and logged with a read-back.
+//
+// Bounded hard at the call site (CMD:VADJ): this raises the voltage a panel is
+// driven at, the ED047TC1's rails are specified at +/-15 V, and the datasheet
+// that would give an absolute maximum is not on this machine.
+void setEpdVadj(uint8_t code);
+uint8_t getEpdVadj();
 void dumpTpsRegisters();
 
 }  // namespace BoardT5S3

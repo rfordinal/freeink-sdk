@@ -36,6 +36,29 @@ int g_vcomMv = kDefaultVcomMv;
 // asked for from a console command may never reach epdPowerOn() at all.
 bool g_dumpTpsOnNextPowerOn = true;
 
+// VADJ (0x02) sets the VPOS/VNEG source rails. **Nothing in this firmware or in
+// upstream freeink-sdk has ever written it**, so every board runs on the value
+// its PMIC powers up with -- 0x03 on both boards here.
+//
+// Why it is now a knob. Board B renders a full-black epd_text frame grey where
+// board A renders it black. Raising the black drive from 6 passes to 14 made B
+// darker but did not reach A, which A manages at 6. Help-but-asymptote is the
+// signature of a voltage ceiling rather than a dose shortfall: no amount of
+// drive time pushes a pixel past the field it is given. The effect also scales
+// with black coverage and deepens down the panel, both of which fit a rail
+// sagging under load somewhere the PMIC's own power-good cannot see, because
+// that senses at the regulator output and not at the panel.
+//
+// Raising VADJ raises the rails and would compensate such a drop. The bit
+// layout below is TI's published map and the **datasheet is not on this
+// machine**, so the voltage each code selects is unverified -- what the device
+// reports back after a write is the only check. `[open]`
+constexpr uint8_t kTpsRegVadj = 0x02;
+
+// 0 = leave VADJ alone (the shipping behaviour). Any other value is written on
+// the next epdPowerOn().
+uint8_t g_vadjOverride = 0;
+
 constexpr uint8_t kTpsRegTmstValue = 0x00;
 constexpr uint8_t kTpsRegEnable = 0x01;
 constexpr uint8_t kTpsRegVcom = 0x03;
@@ -437,6 +460,15 @@ bool epdPowerOn() {
     return false;
   }
 
+  if (g_vadjOverride != 0) {
+    uint8_t before = 0xFF, after = 0xFF;
+    readTpsRegister(kTpsRegVadj, &before, 1);
+    const bool wrote = writeTpsRegister8(kTpsRegVadj, g_vadjOverride);
+    readTpsRegister(kTpsRegVadj, &after, 1);
+    LOG_ERR("T5S3PWR", "VADJ: asked 0x%02X, was 0x%02X, now 0x%02X%s", g_vadjOverride, before, after,
+            wrote ? "" : " (write failed)");
+  }
+
   const uint16_t vcom = static_cast<uint16_t>(-g_vcomMv / 10);
   const uint8_t vcomBytes[2] = {static_cast<uint8_t>(vcom & 0xFF), static_cast<uint8_t>(vcom >> 8)};
   if (!writeTpsRegister(kTpsRegVcom, vcomBytes, sizeof(vcomBytes))) {
@@ -508,6 +540,10 @@ int getEpdDefaultVcomMv() { return kDefaultVcomMv; }
 bool readTpsRegister8Public(uint8_t reg, uint8_t* value) { return readTpsRegister(reg, value, 1); }
 
 void armTpsDump() { g_dumpTpsOnNextPowerOn = true; }
+
+void setEpdVadj(uint8_t code) { g_vadjOverride = code; }
+
+uint8_t getEpdVadj() { return g_vadjOverride; }
 
 // Dumps the registers that say what the part is doing right now: temperature,
 // enable mask, the VCOM pair, power-good and the revision id. The register
