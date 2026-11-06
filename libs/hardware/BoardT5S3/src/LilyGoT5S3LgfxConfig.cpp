@@ -17,6 +17,11 @@ constexpr int kDefaultVcomMv = -1600;
 // takes effect on the very next frame and the sweep costs no reflash.
 int g_vcomMv = kDefaultVcomMv;
 
+// One-shot: CMD:TPS arms it, the next epdPowerOn() dumps and clears it. A
+// latch rather than a direct read because the part only answers I2C while the
+// power sequence holds it awake.
+bool g_dumpTpsOnNextPowerOn = false;
+
 constexpr uint8_t kTpsRegTmstValue = 0x00;
 constexpr uint8_t kTpsRegEnable = 0x01;
 constexpr uint8_t kTpsRegVcom = 0x03;
@@ -382,6 +387,32 @@ bool epdPowerOn() {
   LOG_ERR("T5S3PWR", "epdPowerOn: OK, pca=%ums tps=%ums powerGood=0x%02X vcomMv=%d wrote=0x%02X%02X readback=%s0x%02X%02X",
           pcaElapsedMs, tpsElapsedMs, tpsLastPowerGood, g_vcomMv, vcomBytes[1], vcomBytes[0],
           vcomReadOk ? "" : "(read failed)", vcomBack[1], vcomBack[0]);
+
+  // The register dump has to happen HERE, not from a console command: outside a
+  // refresh epdPowerOff() drives TPS_WAKEUP low and every I2C read to the part
+  // fails with ESP_ERR_INVALID_STATE (measured on board B, 2026-11-06). This is
+  // the only moment the PMIC is awake and reachable.
+  //
+  // VADJ (0x02) is the register this was added for. It sets the VPOS/VNEG
+  // source rails, and **nothing in this firmware ever writes it** -- the power
+  // sequence writes ENABLE and VCOM only, so each part runs on whatever VADJ it
+  // powers up with. Lower rails mean a weaker drive and a black that lands
+  // grey, with power-good still asserted (PG compares against the configured
+  // rails, not an absolute), and VCOM unable to recover it (VCOM shifts the
+  // reference, it does not add headroom). That is the shape of board B's
+  // symptom, so the value is worth seeing on both boards before anything else
+  // is concluded. `[open]` until the two dumps are actually compared.
+  if (g_dumpTpsOnNextPowerOn) {
+    g_dumpTpsOnNextPowerOn = false;
+    for (uint8_t reg = 0x00; reg <= kTpsRegRevId; ++reg) {
+      uint8_t v = 0;
+      if (readTpsRegister(reg, &v, 1)) {
+        LOG_ERR("T5S3PWR", "  TPS[0x%02X] = 0x%02X (%u)", reg, v, v);
+      } else {
+        LOG_ERR("T5S3PWR", "  TPS[0x%02X] = READ FAILED", reg);
+      }
+    }
+  }
   return true;
 }
 
@@ -400,6 +431,8 @@ int getEpdVcomMv() { return g_vcomMv; }
 int getEpdDefaultVcomMv() { return kDefaultVcomMv; }
 
 bool readTpsRegister8Public(uint8_t reg, uint8_t* value) { return readTpsRegister(reg, value, 1); }
+
+void armTpsDump() { g_dumpTpsOnNextPowerOn = true; }
 
 // Dumps the registers that say what the part is doing right now: temperature,
 // enable mask, the VCOM pair, power-good and the revision id. The register

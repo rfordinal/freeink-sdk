@@ -46,6 +46,10 @@ void setEpdVcomMv(int mv);
 int getEpdVcomMv();
 int getEpdDefaultVcomMv();
 bool readTpsRegister8Public(uint8_t reg, uint8_t* value);
+// Arms a full register dump on the next epdPowerOn(). Deferred, not immediate,
+// because the PMIC only answers I2C while the power sequence holds it awake --
+// a read outside a refresh fails with ESP_ERR_INVALID_STATE.
+void armTpsDump();
 void dumpTpsRegisters();
 
 }  // namespace BoardT5S3
