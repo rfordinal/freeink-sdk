@@ -1,5 +1,6 @@
 #include <BoardT5S3.h>
 #include <LgfxEpdConfig.h>
+#include <Logging.h>
 #include <Wire.h>
 
 namespace {
@@ -210,23 +211,39 @@ bool readTpsRegister(uint8_t reg, uint8_t* data, size_t len) {
   return true;
 }
 
-bool waitForPcaPinHigh(uint8_t pin, uint32_t timeoutMs) {
+// elapsedMs and lastRead are diagnostic out-params (T-253 / docs/panel-ed047tc1.md
+// VCOM-per-panel investigation, 2026-11-06): epdPowerOn() below used to discard
+// how close each wait came to its 400 ms timeout, so a board whose TPS65185 is
+// marginally slow -- not outright failing, just eating most of the margin --
+// looked identical to one booting instantly. Both are nullptr-safe for any
+// future caller that does not care.
+bool waitForPcaPinHigh(uint8_t pin, uint32_t timeoutMs, uint32_t* elapsedMs = nullptr) {
   const uint32_t start = millis();
   bool high = false;
   while (millis() - start < timeoutMs) {
-    if (BoardT5S3::readPca9535Pin(pin, &high) && high) return true;
+    if (BoardT5S3::readPca9535Pin(pin, &high) && high) {
+      if (elapsedMs) *elapsedMs = millis() - start;
+      return true;
+    }
     delay(1);
   }
+  if (elapsedMs) *elapsedMs = millis() - start;
   return false;
 }
 
-bool waitForTpsReady(uint32_t timeoutMs) {
+bool waitForTpsReady(uint32_t timeoutMs, uint32_t* elapsedMs = nullptr, uint8_t* lastRead = nullptr) {
   const uint32_t start = millis();
   uint8_t powerGood = 0;
   while (millis() - start < timeoutMs) {
-    if (readTpsRegister(kTpsRegPowerGood, &powerGood, 1) && (powerGood & 0xFA) == 0xFA) return true;
+    if (readTpsRegister(kTpsRegPowerGood, &powerGood, 1) && (powerGood & 0xFA) == 0xFA) {
+      if (elapsedMs) *elapsedMs = millis() - start;
+      if (lastRead) *lastRead = powerGood;
+      return true;
+    }
     delay(1);
   }
+  if (elapsedMs) *elapsedMs = millis() - start;
+  if (lastRead) *lastRead = powerGood;
   return false;
 }
 
@@ -282,6 +299,20 @@ void epdPowerOff() {
   digitalWrite(EP_STV, LOW);
 }
 
+// Diagnostic logging added 2026-11-06 for the T-253 VCOM-per-panel
+// investigation (docs/panel-ed047tc1.md): this function previously had zero
+// log lines on any of its five failure returns (firmware/explorink's own
+// Documenting Findings rule: "a silent no-op branch makes a hardware capture
+// unable to tell nothing-to-do from never-ran" -- the same gap, here on a
+// power-up that silently tears the rails back down). Board A (t5s3pro) shows
+// a crisp black sleep/full-refresh screen; board B (t5s3pro-b) shows the same
+// draw as a pale, washed-out field -- same firmware, same freeink-sdk commit,
+// same hardcoded -1600 mV VCOM on both. This logging exists to tell apart a
+// board that is simply slow to raise PWR_GOOD/PowerGood (still within margin,
+// points at per-panel VCOM/dose) from one that is silently failing
+// epdPowerOn() and running the scan with torn-down rails (points at the TPS
+// chain itself). Remove once T-253 is settled, or promote to a permanent
+// DBG line if it proves worth keeping.
 bool epdPowerOn() {
   digitalWrite(EP_STV, HIGH);
 
@@ -292,16 +323,24 @@ bool epdPowerOn() {
   ok &= BoardT5S3::writePca9535Pin(PCA9535_IO13_TPS_PWRUP, true);
   ok &= BoardT5S3::writePca9535Pin(PCA9535_IO14_VCOM_CTRL, true);
   if (!ok) {
+    LOG_ERR("T5S3PWR", "epdPowerOn: PCA9535 pin write failed (step 1, enable pins)");
     epdPowerOff();
     return false;
   }
 
   delay(1);
-  if (!waitForPcaPinHigh(PCA9535_IO16_TPS_PWR_GOOD, 400)) {
+  uint32_t pcaElapsedMs = 0;
+  const bool pcaOk = waitForPcaPinHigh(PCA9535_IO16_TPS_PWR_GOOD, 400, &pcaElapsedMs);
+  if (!pcaOk) {
+    LOG_ERR("T5S3PWR", "epdPowerOn: PCA9535 PWR_GOOD pin never went high (%u ms, timeout 400)", pcaElapsedMs);
     epdPowerOff();
     return false;
   }
+  if (pcaElapsedMs > 50) {
+    LOG_ERR("T5S3PWR", "epdPowerOn: PCA9535 PWR_GOOD pin slow: %u ms of 400 budget", pcaElapsedMs);
+  }
   if (!writeTpsRegister8(kTpsRegEnable, kTpsEnableOutputs)) {
+    LOG_ERR("T5S3PWR", "epdPowerOn: TPS65185 I2C write of reg 0x%02X failed", kTpsRegEnable);
     epdPowerOff();
     return false;
   }
@@ -309,13 +348,21 @@ bool epdPowerOn() {
   const uint16_t vcom = static_cast<uint16_t>(-kDefaultVcomMv / 10);
   const uint8_t vcomBytes[2] = {static_cast<uint8_t>(vcom & 0xFF), static_cast<uint8_t>(vcom >> 8)};
   if (!writeTpsRegister(kTpsRegVcom, vcomBytes, sizeof(vcomBytes))) {
+    LOG_ERR("T5S3PWR", "epdPowerOn: TPS65185 I2C write of VCOM reg 0x%02X failed", kTpsRegVcom);
     epdPowerOff();
     return false;
   }
-  if (!waitForTpsReady(400)) {
+  uint32_t tpsElapsedMs = 0;
+  uint8_t tpsLastPowerGood = 0;
+  const bool tpsOk = waitForTpsReady(400, &tpsElapsedMs, &tpsLastPowerGood);
+  if (!tpsOk) {
+    LOG_ERR("T5S3PWR", "epdPowerOn: TPS65185 PowerGood (reg 0x%02X) never settled, last=0x%02X mask=0x%02X, %u ms of 400",
+            kTpsRegPowerGood, tpsLastPowerGood, 0xFA, tpsElapsedMs);
     epdPowerOff();
     return false;
   }
+  LOG_ERR("T5S3PWR", "epdPowerOn: OK, pca=%ums tps=%ums powerGood=0x%02X vcomMv=%d", pcaElapsedMs, tpsElapsedMs,
+          tpsLastPowerGood, kDefaultVcomMv);
   return true;
 }
 
