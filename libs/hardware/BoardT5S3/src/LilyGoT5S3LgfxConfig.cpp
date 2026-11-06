@@ -6,9 +6,22 @@
 namespace {
 
 constexpr int kDefaultVcomMv = -1600;
+
+// The VCOM actually programmed on the next epdPowerOn(). Mutable, not constexpr,
+// for the T-253 sweep: VCOM is an **assigned per-panel value with a +/-0.1 V
+// window** whose centre nobody downstream knows -- the factory does not
+// calibrate per unit (docs/panel-ed047tc1.md, "VCOM is an assigned per-panel
+// value"). Too negative a VCOM weakens the black drive and strengthens the
+// white one (effective field is source - VCOM), which is exactly how a black
+// field lands grey. epdPowerOn() runs before every refresh, so a write here
+// takes effect on the very next frame and the sweep costs no reflash.
+int g_vcomMv = kDefaultVcomMv;
+
+constexpr uint8_t kTpsRegTmstValue = 0x00;
 constexpr uint8_t kTpsRegEnable = 0x01;
 constexpr uint8_t kTpsRegVcom = 0x03;
 constexpr uint8_t kTpsRegPowerGood = 0x0F;
+constexpr uint8_t kTpsRegRevId = 0x10;
 constexpr uint8_t kTpsEnableOutputs = 0x3F;
 
 #define LUT_MAKE(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, da, db, dc, dd, de, df) \
@@ -345,13 +358,18 @@ bool epdPowerOn() {
     return false;
   }
 
-  const uint16_t vcom = static_cast<uint16_t>(-kDefaultVcomMv / 10);
+  const uint16_t vcom = static_cast<uint16_t>(-g_vcomMv / 10);
   const uint8_t vcomBytes[2] = {static_cast<uint8_t>(vcom & 0xFF), static_cast<uint8_t>(vcom >> 8)};
   if (!writeTpsRegister(kTpsRegVcom, vcomBytes, sizeof(vcomBytes))) {
     LOG_ERR("T5S3PWR", "epdPowerOn: TPS65185 I2C write of VCOM reg 0x%02X failed", kTpsRegVcom);
     epdPowerOff();
     return false;
   }
+  // Read the VCOM pair straight back. A write that is ACKed is not proof the
+  // part took the value, and this sweep's whole conclusion rests on the
+  // programmed VCOM actually being what we asked for.
+  uint8_t vcomBack[2] = {0, 0};
+  const bool vcomReadOk = readTpsRegister(kTpsRegVcom, vcomBack, sizeof(vcomBack));
   uint32_t tpsElapsedMs = 0;
   uint8_t tpsLastPowerGood = 0;
   const bool tpsOk = waitForTpsReady(400, &tpsElapsedMs, &tpsLastPowerGood);
@@ -361,12 +379,59 @@ bool epdPowerOn() {
     epdPowerOff();
     return false;
   }
-  LOG_ERR("T5S3PWR", "epdPowerOn: OK, pca=%ums tps=%ums powerGood=0x%02X vcomMv=%d", pcaElapsedMs, tpsElapsedMs,
-          tpsLastPowerGood, kDefaultVcomMv);
+  LOG_ERR("T5S3PWR", "epdPowerOn: OK, pca=%ums tps=%ums powerGood=0x%02X vcomMv=%d wrote=0x%02X%02X readback=%s0x%02X%02X",
+          pcaElapsedMs, tpsElapsedMs, tpsLastPowerGood, g_vcomMv, vcomBytes[1], vcomBytes[0],
+          vcomReadOk ? "" : "(read failed)", vcomBack[1], vcomBack[0]);
   return true;
 }
 
 }  // namespace
+
+namespace BoardT5S3 {
+
+// T-253 bench instruments. Declared in BoardT5S3.h, defined here because the
+// TPS65185 I2C helpers and the VCOM the power sequence programs both live in
+// this file's anonymous namespace.
+
+void setEpdVcomMv(int mv) { g_vcomMv = mv; }
+
+int getEpdVcomMv() { return g_vcomMv; }
+
+int getEpdDefaultVcomMv() { return kDefaultVcomMv; }
+
+bool readTpsRegister8Public(uint8_t reg, uint8_t* value) { return readTpsRegister(reg, value, 1); }
+
+// Dumps the registers that say what the part is doing right now: temperature,
+// enable mask, the VCOM pair, power-good and the revision id. The register
+// numbers are TI's published TPS65185 map; **the datasheet is not on disk**, so
+// treat the names as unverified -- what is verified is that 0x01, 0x03 and 0x0F
+// are the enable, VCOM and power-good registers this board's own working power
+// sequence has always used.
+//
+// TMST_VALUE (0x00) is reported raw. Whether it holds a live conversion or a
+// stale one depends on the part's acquisition mode, which nothing here
+// configures, so a reading is a lead and not a measurement. `[open]`
+void dumpTpsRegisters() {
+  const struct {
+    uint8_t reg;
+    const char* name;
+  } regs[] = {
+      {kTpsRegTmstValue, "TMST_VALUE"}, {kTpsRegEnable, "ENABLE"},    {0x02, "VADJ"},
+      {kTpsRegVcom, "VCOM1"},           {0x04, "VCOM2"},              {kTpsRegPowerGood, "PG"},
+      {kTpsRegRevId, "REVID"},
+  };
+  for (const auto& r : regs) {
+    uint8_t v = 0;
+    if (readTpsRegister(r.reg, &v, 1)) {
+      LOG_ERR("T5S3PWR", "TPS reg 0x%02X %-10s = 0x%02X (%u)", r.reg, r.name, v, v);
+    } else {
+      LOG_ERR("T5S3PWR", "TPS reg 0x%02X %-10s = READ FAILED", r.reg, r.name);
+    }
+  }
+  LOG_ERR("T5S3PWR", "vcomMv now %d (default %d)", g_vcomMv, kDefaultVcomMv);
+}
+
+}  // namespace BoardT5S3
 
 namespace freeink {
 
