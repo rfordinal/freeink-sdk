@@ -36,6 +36,15 @@ int g_vcomMv = kDefaultVcomMv;
 // asked for from a console command may never reach epdPowerOn() at all.
 bool g_dumpTpsOnNextPowerOn = true;
 
+// Last completed rail-up to rail-down span, and how many entries the table that
+// drove it has. Recorded rather than logged because logSerial runs with
+// setTxTimeoutMs(1): during CMD:SHOWIMAGE's 64 kB transfer the log lines are
+// dropped, which is why several measurements today read as "the knob does
+// nothing" when the frame under test had simply never been seen. Read it back
+// after the transfer with CMD:LASTSCAN.
+uint32_t g_lastScanMs = 0;
+uint32_t g_lastPowerOnMs = 0;
+
 // VADJ (0x02) sets the VPOS/VNEG source rails. **Nothing in this firmware or in
 // upstream freeink-sdk has ever written it**, so every board runs on the value
 // its PMIC powers up with -- 0x03 on both boards here.
@@ -451,6 +460,10 @@ void epdPowerOff() {
   // Logged so the rail cycling is visible. Whether the rails come down between
   // refreshes decides whether a VCOM written from the console is ever
   // programmed, because VCOM is only pushed to the PMIC inside epdPowerOn().
+  if (g_lastPowerOnMs != 0) {
+    g_lastScanMs = millis() - g_lastPowerOnMs;
+    g_lastPowerOnMs = 0;
+  }
   LOG_ERR("T5S3PWR", "epdPowerOff: rails down");
   BoardT5S3::writePca9535Pin(PCA9535_IO10_EP_OE, false);
   BoardT5S3::writePca9535Pin(PCA9535_IO11_EP_MODE, false);
@@ -537,6 +550,7 @@ bool epdPowerOn() {
     epdPowerOff();
     return false;
   }
+  g_lastPowerOnMs = millis();
   LOG_ERR("T5S3PWR", "epdPowerOn: OK, pca=%ums tps=%ums powerGood=0x%02X vcomMv=%d wrote=0x%02X%02X readback=%s0x%02X%02X busHz=%u textLutLen=%u",
           pcaElapsedMs, tpsElapsedMs, tpsLastPowerGood, g_vcomMv, vcomBytes[1], vcomBytes[0],
           vcomReadOk ? "" : "(read failed)", vcomBack[1], vcomBack[0], (unsigned)kBusHz,
@@ -587,6 +601,10 @@ int getEpdDefaultVcomMv() { return kDefaultVcomMv; }
 bool readTpsRegister8Public(uint8_t reg, uint8_t* value) { return readTpsRegister(reg, value, 1); }
 
 void armTpsDump() { g_dumpTpsOnNextPowerOn = true; }
+
+uint32_t getLastScanMs() { return g_lastScanMs; }
+
+uint32_t getTextLutLen() { return sizeof(kTextLut) / sizeof(kTextLut[0]); }
 
 void setEpdVadj(uint8_t code) { g_vadjOverride = code; }
 

@@ -59,6 +59,12 @@ void armTpsDump();
 // Bounded hard at the call site (CMD:VADJ): this raises the voltage a panel is
 // driven at, the ED047TC1's rails are specified at +/-15 V, and the datasheet
 // that would give an absolute maximum is not on this machine.
+// Last rail-up to rail-down span in ms, and the live clean-frame table length.
+// Recorded instead of logged: logSerial drops lines during a bulk transfer, so
+// the frame CMD:SHOWIMAGE pushes could never be timed from the log.
+uint32_t getLastScanMs();
+uint32_t getTextLutLen();
+
 void setEpdVadj(uint8_t code);
 uint8_t getEpdVadj();
 void dumpTpsRegisters();
