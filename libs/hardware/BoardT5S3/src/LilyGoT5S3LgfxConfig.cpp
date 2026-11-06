@@ -185,13 +185,31 @@ constexpr uint32_t kFast1bitLut[] = {
 #define EXPLORINK_TEXT_LUT_EXTRA_DRIVE 0
 #endif
 
+// Drop the eraser prefix: the first five rows drive a black-target pixel toward
+// WHITE (column 0 reads 2,2,2,2,2) before the remaining rows drive it black.
+// That inversion is what makes a clean frame clean -- it lifts residue -- and
+// it is also the one structural difference between this table and
+// kFast1bitLut, which has no eraser and which board B renders as a solid
+// black. 1 keeps the stock prefix, 0 replaces those five rows with inert ones
+// so the pass count and timing are unchanged and only the erase is gone.
+//
+// A diagnostic, not a candidate: without the prefix a clean frame stops
+// clearing residue, which is its job.
+#ifndef EXPLORINK_TEXT_LUT_ERASER
+#define EXPLORINK_TEXT_LUT_ERASER 1
+#endif
+
 constexpr uint32_t kTextLut[] = {
     // 12 drive rows, verbatim from LovyanGFX lut_text.
+#if EXPLORINK_TEXT_LUT_ERASER
     LUT_MAKE(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1),
     LUT_MAKE(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1),
     LUT_MAKE(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1),
     LUT_MAKE(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 1),
     LUT_MAKE(2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 1),
+#else
+    ~0u, ~0u, ~0u, ~0u, ~0u,
+#endif
     LUT_MAKE(1, 2, 2, 1, 1, 1, 1, 1, 3, 3, 1, 1, 3, 3, 1, 2),
     LUT_MAKE(1, 3, 3, 1, 1, 1, 1, 3, 3, 1, 1, 1, 1, 3, 1, 2),
     LUT_MAKE(1, 3, 3, 1, 2, 2, 1, 1, 1, 1, 2, 1, 1, 1, 1, 2),
