@@ -51,8 +51,57 @@ class FreeInkBusEPD : public lgfx::Bus_EPD {
   }
 };
 
+// Clean-frame tables of increasing drive, swappable at runtime (CMD:TEXTLUT).
+//
+// Board B needs far more drive than board A to reach the same black: at 5
+// passes it lands almost white, at 37 it lands grey, and adding 8 pure drive
+// rows to the stock table moved it darker without arriving. Board A is solid
+// black at every one of those. So the question is how much drive B actually
+// needs, and answering it one reflash at a time costs four minutes a point --
+// hence a ladder that is picked over serial.
+//
+// Each row is kFast1bitLut's shape: 1 drives black, 2 drives white, 3 leaves
+// the greys inert. No eraser prefix, so every pass is drive.
+#define FI_DRIVE_ROW \
+  (uint32_t)((1 << 0) | (3 << 2) | (3 << 4) | (3 << 6) | (3 << 8) | (3 << 10) | (3 << 12) | (3 << 14) | \
+             (3 << 16) | (3 << 18) | (3 << 20) | (3 << 22) | (3 << 24) | (3 << 26) | (3 << 28) | (2u << 30))
+
+constexpr uint32_t kDrive8[]  = {FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+                                 FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW, ~0u, 0u};
+constexpr uint32_t kDrive16[] = {FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+                                 FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+                                 FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+                                 FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW, ~0u, 0u};
+constexpr uint32_t kDrive32[] = {FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+                                 FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+                                 FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+                                 FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+                                 FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+                                 FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+                                 FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+                                 FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW, ~0u, 0u};
+constexpr uint32_t kDrive64[] = {
+    FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+    FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+    FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+    FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+    FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+    FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+    FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+    FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,FI_DRIVE_ROW,
+    ~0u, 0u};
+
 class FreeInkLgfxEpd : public lgfx::LGFX_Device {
  public:
+  // Swap the clean-frame table live. config_detail() is the same seat setup()
+  // fills, so this is the supported way in rather than a poke at panel state.
+  void setTextLut(const uint32_t* lut, size_t step) {
+    auto dc = _panel.config_detail();
+    dc.lut_text = lut;
+    dc.lut_text_step = step;
+    _panel.config_detail(dc);
+  }
+
   void setup(const LgfxEpdConfig& c, uint16_t w, uint16_t h) {
     auto bc = _bus.config();
     bc.bus_speed = c.busHz;
@@ -257,6 +306,20 @@ void pushCanvas(lgfx::epd_mode::epd_mode_t epdMode) {
 
 }  // namespace
 #endif  // FREEINK_DRIVER_LGFX_EPD
+
+int setTextLutVariant(int drives) {
+#if FREEINK_DRIVER_LGFX_EPD
+  switch (drives) {
+    case 8:  g_dev.setTextLut(kDrive8,  sizeof(kDrive8)  / sizeof(uint32_t)); return 8;
+    case 16: g_dev.setTextLut(kDrive16, sizeof(kDrive16) / sizeof(uint32_t)); return 16;
+    case 32: g_dev.setTextLut(kDrive32, sizeof(kDrive32) / sizeof(uint32_t)); return 32;
+    case 64: g_dev.setTextLut(kDrive64, sizeof(kDrive64) / sizeof(uint32_t)); return 64;
+    default: return -1;
+  }
+#else
+  (void)drives; return -1;
+#endif
+}
 
 bool setLgfxFastLut(int which) {
 #if FREEINK_DRIVER_LGFX_EPD

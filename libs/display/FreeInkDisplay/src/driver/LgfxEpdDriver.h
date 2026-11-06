@@ -63,6 +63,11 @@ PanelDriver& lgfxEpdDriver();
 // because dose -- whether four drive passes still land a solid black on this
 // glass -- cannot be judged from a framebuffer readback, only by eye on the
 // device (T-273).
+// Swap the clean-frame table for a pure-drive one of N passes (8/16/32/64),
+// live, so the drive a panel needs can be found without a reflash per point.
+// Returns the applied count, or -1.
+int setTextLutVariant(int drives);
+
 bool setLgfxFastLut(int which);
 int getLgfxFastLut();
 
