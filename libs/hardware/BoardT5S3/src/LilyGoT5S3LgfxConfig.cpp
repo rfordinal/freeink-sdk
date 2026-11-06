@@ -199,6 +199,34 @@ constexpr uint32_t kFast1bitLut[] = {
 #define EXPLORINK_TEXT_LUT_ERASER 1
 #endif
 
+// Replace the whole clean-frame table with kFast1bitLut's shape: four passes of
+// pure black/white drive, one idle, terminator. 0 keeps the stock table.
+//
+// What this isolates. Board B renders a full-black clean frame grey but renders
+// the same full black through epd_fast as a solid black, and renders a 21 %
+// black clean frame black. So neither the pass count nor the coverage decides
+// it on its own -- their product does, which is the total charge one frame
+// asks the supply for. This cuts the clean frame from 37 passes to 5 while
+// leaving coverage at 100 %, the one corner of that table still untested.
+//
+// Everything else has been ruled out by measurement: identical PMIC registers
+// on both boards, VCOM read back, a clean PSRAM pattern test, a verified
+// all-zero framebuffer, no grayscale planes in play, and a seven-week-old
+// build that was good on this board rendering the same grey today.
+#ifndef EXPLORINK_TEXT_LUT_SHORT
+#define EXPLORINK_TEXT_LUT_SHORT 0
+#endif
+
+#if EXPLORINK_TEXT_LUT_SHORT
+constexpr uint32_t kTextLut[] = {
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+    ~0u,
+    0u,
+};
+#else
 constexpr uint32_t kTextLut[] = {
     // 12 drive rows, verbatim from LovyanGFX lut_text.
 #if EXPLORINK_TEXT_LUT_ERASER
@@ -312,6 +340,7 @@ constexpr uint32_t kTextLut[] = {
 #endif
     0u,
 };
+#endif  // EXPLORINK_TEXT_LUT_SHORT
 
 #undef LUT_MAKE
 
