@@ -7,6 +7,16 @@ namespace {
 
 constexpr int kDefaultVcomMv = -1600;
 
+// Panel bus clock. Stock 16 MHz; EXPLORINK_T5S3_BUS_HZ overrides it for the
+// T-253 load test. Hoisted to a named constant purely so epdPowerOn() can log
+// it: a build flag that silently fails to reach this translation unit looks
+// exactly like a knob that does nothing, and the first 8 MHz attempt could not
+// tell those apart.
+#ifndef EXPLORINK_T5S3_BUS_HZ
+#define EXPLORINK_T5S3_BUS_HZ 16000000
+#endif
+constexpr uint32_t kBusHz = EXPLORINK_T5S3_BUS_HZ;
+
 // The VCOM actually programmed on the next epdPowerOn(). Mutable, not constexpr,
 // for the T-253 sweep: VCOM is an **assigned per-panel value with a +/-0.1 V
 // window** whose centre nobody downstream knows -- the factory does not
@@ -17,10 +27,14 @@ constexpr int kDefaultVcomMv = -1600;
 // takes effect on the very next frame and the sweep costs no reflash.
 int g_vcomMv = kDefaultVcomMv;
 
-// One-shot: CMD:TPS arms it, the next epdPowerOn() dumps and clears it. A
-// latch rather than a direct read because the part only answers I2C while the
-// power sequence holds it awake.
-bool g_dumpTpsOnNextPowerOn = false;
+// Starts armed, so the first power-up after boot always dumps without anyone
+// having to send a command -- CMD:TPS re-arms it for a later look. A latch
+// rather than a direct read because the part only answers I2C while the power
+// sequence holds it awake, and arming cannot be relied on from the console:
+// FreeInkBusEPD::powerControl() short-circuits when the rails are already up
+// (LgfxEpdDriver.cpp, `if (_pwr_on == powerOn) return true;`), so a refresh
+// asked for from a console command may never reach epdPowerOn() at all.
+bool g_dumpTpsOnNextPowerOn = true;
 
 constexpr uint8_t kTpsRegTmstValue = 0x00;
 constexpr uint8_t kTpsRegEnable = 0x01;
@@ -128,6 +142,26 @@ constexpr uint32_t kFast1bitLut[] = {
 #define EXPLORINK_TEXT_LUT_IDLE 19
 #endif
 
+// Extra pure black/white drive rows appended to the 12 stock ones, 0 = off.
+//
+// Why this knob exists. Decoding kTextLut's column 0 (the black target) gives
+// 2,2,2,2,2 then 1,1,1,3,1,1,1 -- five passes driving the pixel toward WHITE
+// (the eraser prefix) and then six driving it black. Six is what a black pixel
+// gets out of a clean frame. kFast1bitLut, which the menus use and which board
+// B renders as a solid black, spends four passes of pure black drive with no
+// eraser in front of them.
+//
+// Board B lands a full-black epd_text frame grey while board A lands it black,
+// on identical firmware, identical TPS65185 registers and an identical scan
+// time, and the effect scales with how much of the panel is black. Six drive
+// passes being marginally short on one panel and sufficient on another fits
+// that; so does the top-to-bottom gradient. These rows add dose without
+// touching the eraser or the greys: 1 drives black, 2 drives white, 3 is
+// inert, which is exactly kFast1bitLut's row.
+#ifndef EXPLORINK_TEXT_LUT_EXTRA_DRIVE
+#define EXPLORINK_TEXT_LUT_EXTRA_DRIVE 0
+#endif
+
 constexpr uint32_t kTextLut[] = {
     // 12 drive rows, verbatim from LovyanGFX lut_text.
     LUT_MAKE(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1),
@@ -142,6 +176,42 @@ constexpr uint32_t kTextLut[] = {
     LUT_MAKE(1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2),
     LUT_MAKE(1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2),
     LUT_MAKE(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 3, 3, 2),
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 1
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 2
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 3
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 4
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 5
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 6
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 7
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 8
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 9
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 10
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 11
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 12
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
 #if EXPLORINK_TEXT_LUT_IDLE >= 1
     ~0u,
 #endif
@@ -308,6 +378,10 @@ bool prepareEpdPower() {
 }
 
 void epdPowerOff() {
+  // Logged so the rail cycling is visible. Whether the rails come down between
+  // refreshes decides whether a VCOM written from the console is ever
+  // programmed, because VCOM is only pushed to the PMIC inside epdPowerOn().
+  LOG_ERR("T5S3PWR", "epdPowerOff: rails down");
   BoardT5S3::writePca9535Pin(PCA9535_IO10_EP_OE, false);
   BoardT5S3::writePca9535Pin(PCA9535_IO11_EP_MODE, false);
   BoardT5S3::writePca9535Pin(PCA9535_IO13_TPS_PWRUP, false);
@@ -384,9 +458,10 @@ bool epdPowerOn() {
     epdPowerOff();
     return false;
   }
-  LOG_ERR("T5S3PWR", "epdPowerOn: OK, pca=%ums tps=%ums powerGood=0x%02X vcomMv=%d wrote=0x%02X%02X readback=%s0x%02X%02X",
+  LOG_ERR("T5S3PWR", "epdPowerOn: OK, pca=%ums tps=%ums powerGood=0x%02X vcomMv=%d wrote=0x%02X%02X readback=%s0x%02X%02X busHz=%u textLutLen=%u",
           pcaElapsedMs, tpsElapsedMs, tpsLastPowerGood, g_vcomMv, vcomBytes[1], vcomBytes[0],
-          vcomReadOk ? "" : "(read failed)", vcomBack[1], vcomBack[0]);
+          vcomReadOk ? "" : "(read failed)", vcomBack[1], vcomBack[0], (unsigned)kBusHz,
+          (unsigned)(sizeof(kTextLut) / sizeof(kTextLut[0])));
 
   // The register dump has to happen HERE, not from a console command: outside a
   // refresh epdPowerOff() drives TPS_WAKEUP low and every I2C read to the part
@@ -488,7 +563,24 @@ const LgfxEpdConfig& lilygoT5S3LgfxConfig() {
       // no free GPIO on this board to give it instead. prepareEpdPower() above
       // deselects it before the bus is built, which is what makes it harmless.
       T5S3_LORA_CS,
-      16000000,
+      // busHz. Stock is 16 MHz; EXPLORINK_T5S3_BUS_HZ overrides it for the
+      // T-253 load test, which is the whole reason this is not a literal.
+      //
+      // What the test is after: board B draws a full-black epd_text frame as
+      // grey while board A draws it black, on bit-identical firmware, with all
+      // 17 TPS65185 registers equal and the same 1,23 s scan. The effect tracks
+      // **black coverage** -- 21 % black is black on both, 50 % is black with B
+      // slightly greyer, 100 % splits them -- and the bottom of the panel comes
+      // out lighter than the top, so it builds during the scan. That is the
+      // shape of a supply drooping under load, and power-good cannot see it:
+      // waitForTpsReady() samples once, before the scan starts.
+      //
+      // Halving the clock halves the row rate, which lowers the average draw
+      // and gives the rail time to recover between rows. If B's full-black
+      // frame closes to black at 8 MHz, the droop is real and this is a lever;
+      // if nothing moves, droop is out and the next suspect is series
+      // resistance in the panel's own power path (the FPC contact).
+      kBusHz,
       8,
       0,
       {&prepareEpdPower, &epdPowerOn, &epdPowerOff},

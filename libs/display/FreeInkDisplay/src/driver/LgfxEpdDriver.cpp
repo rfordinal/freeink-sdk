@@ -1,5 +1,6 @@
 #include "LgfxEpdDriver.h"
 
+#include <Logging.h>
 #include <BoardConfig.h>
 
 #include <cstring>
@@ -308,6 +309,13 @@ void LgfxEpdDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev,
 #if FREEINK_DRIVER_LGFX_EPD
   fillCanvasBW(fb);  // expand the 1-bpp frame into the gray canvas
   g_lastBaseEpdMode = epdModeFor(mode);
+  // T-253: which waveform a refresh actually takes. Two build knobs in this
+  // path (EXPLORINK_TEXT_LUT_IDLE, EXPLORINK_T5S3_BUS_HZ) were each read as
+  // "no effect" when the real question was whether the frame under test even
+  // uses the table the knob turns -- so the mode goes in the log rather than
+  // being inferred from a duration.
+  LOG_ERR("T5S3PWR", "refresh: RefreshMode=%d -> epd_mode=%d (fast=%d text=%d)", (int)mode,
+          (int)g_lastBaseEpdMode, (int)lgfx::epd_mode::epd_fast, (int)lgfx::epd_mode::epd_text);
   pushCanvas(g_lastBaseEpdMode);
   if (turnOff) g_dev.sleep();
 #else
