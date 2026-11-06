@@ -374,6 +374,126 @@ constexpr uint32_t kTextLut[] = {
 #if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 40
     LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
 #endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 41
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 42
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 43
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 44
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 45
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 46
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 47
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 48
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 49
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 50
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 51
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 52
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 53
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 54
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 55
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 56
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 57
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 58
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 59
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 60
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 61
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 62
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 63
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 64
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 65
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 66
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 67
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 68
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 69
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 70
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 71
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 72
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 73
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 74
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 75
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 76
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 77
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 78
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 79
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
+#if EXPLORINK_TEXT_LUT_EXTRA_DRIVE >= 80
+    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
+#endif
 #if EXPLORINK_TEXT_LUT_IDLE >= 1
     ~0u,
 #endif
