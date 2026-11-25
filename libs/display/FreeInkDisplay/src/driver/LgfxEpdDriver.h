@@ -27,6 +27,7 @@ namespace freeink {
 
 class LgfxEpdDriver : public PanelDriver {
  public:
+  const char* controllerName() const override { return "LovyanGFX EPD"; }
   explicit LgfxEpdDriver(const LgfxEpdConfig& cfg);
 
   uint32_t spiHz() const override { return 0; }  // LovyanGFX owns the bus
@@ -40,7 +41,10 @@ class LgfxEpdDriver : public PanelDriver {
 
   // 16-gray path: the facade streams LSB/MSB 1-bpp planes (whole or in strips);
   // displayGray combines them with the B/W base into the panel's 8-bit gray canvas.
-  bool supportsStripGrayscale() const override { return true; }
+  GrayscaleCapabilities grayscaleCapabilities(GrayscaleMode mode = GrayscaleMode::Overlay) const override {
+    if (mode != GrayscaleMode::Overlay) return {};
+    return {GrayscaleEncoding::OverlayMasks, GrayscaleBase::Separate, true, false, false};
+  }
   void copyGrayscaleLsb(EpdBus& bus, const uint8_t* lsb) override;
   void copyGrayscaleMsb(EpdBus& bus, const uint8_t* msb) override;
   void writeGrayscalePlaneStrip(EpdBus& bus, GrayPlane plane, const uint8_t* rows, uint16_t yStart,

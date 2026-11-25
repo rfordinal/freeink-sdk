@@ -1,10 +1,11 @@
 #include "Uc8179Driver.h"
+#include "../lut/X4ProTextAaLuts.h"
 
 #include <Arduino.h>
-
+#include <BoardConfig.h>
 #include <string.h>
 
-#include <BoardConfig.h>
+#include "../lut/UltraChipDirectGrayLuts.h"
 #if defined(BOARD_HAS_PSRAM)
 #include <esp_heap_caps.h>
 #endif
@@ -14,13 +15,14 @@ namespace {
 // UC8179 command set (UC8179 datasheet + OEM UC8179_800x480 stream, via Ghidra).
 constexpr uint8_t CMD_PANEL_SETTING = 0x00;       // PSR
 constexpr uint8_t CMD_POWER_OFF = 0x02;           // POF
-constexpr uint8_t CMD_PFS = 0x03;                 // PFS (power-off sequence; PLL is 0x30)
+constexpr uint8_t CMD_PFS = 0x03;                 // PFS (power-off sequence)
 constexpr uint8_t CMD_POWER_ON = 0x04;            // PON
 constexpr uint8_t CMD_BOOSTER_SOFT_START = 0x06;  // BTST
 constexpr uint8_t CMD_DEEP_SLEEP = 0x07;          // DSLP (check code 0xA5)
 constexpr uint8_t CMD_DTM1 = 0x10;                // OLD plane in KW mode
 constexpr uint8_t CMD_DTM2 = 0x13;                // NEW plane in KW mode
 constexpr uint8_t CMD_DISPLAY_REFRESH = 0x12;     // DRF
+constexpr uint8_t CMD_PLL_CONTROL = 0x30;         // PLL
 constexpr uint8_t CMD_PARTIAL_WINDOW = 0x90;      // PTL
 constexpr uint8_t CMD_PARTIAL_IN = 0x91;          // PTIN (partial refresh in)
 constexpr uint8_t CMD_PARTIAL_OUT = 0x92;         // PTOUT (partial refresh out)
@@ -33,16 +35,18 @@ constexpr uint8_t CMD_POWER_SAVE = 0xE3;          // PWS (VCOM/source line perio
 constexpr uint8_t CMD_TSSET = 0xE5;               // TSSET (forced temperature; frame-rate lever)
 
 constexpr uint8_t CDI_INTERVAL = 0x07;  // CDI byte1, constant
+constexpr uint8_t PLL_40_HZ = 0x05;
+constexpr uint8_t PLL_50_HZ = 0x06;
 
-// 4-level grayscale (AA) waveform LUTs — stock's REAL grayscale set (the short
-// 2-frame LUTs FUN_4214ebd0 actually uploads @app1 DROM 0x3c5d8994..), uploaded
-// in custom-LUT mode (PSR REG=1). NOTE: unlike the (dead, grainy) gray_full set,
-// here the register command is sent SEPARATELY — blob byte0 is DATA, not the cmd.
-// Each LUT is 42 (0x2A) data bytes; only the first ~12 are non-zero. Level select
-// by (old=0x10/LSB, new=0x13/MSB): (0,0)=LUTKK black, (0,1)=LUTKW, (1,0)=LUTWK,
-// (1,1)=LUTWW white. This is the byte-exact stock set; CrossPoint's overlay-mask
-// representation is converted to these absolute selectors before upload rather
-// than modifying the waveform.
+// B/W-dependent grayscale (AA) waveform LUTs — stock's REAL grayscale set (the
+// short 2-frame LUTs FUN_4214ebd0 actually uploads @app1 DROM 0x3c5d8994..),
+// uploaded in custom-LUT mode (PSR REG=1). Unlike the full-gray packet, here
+// the register command is sent SEPARATELY — blob byte0 is DATA, not the cmd.
+// Each LUT is 42 (0x2A) data bytes; only the first ~12 are non-zero. Level
+// select by (old=0x10/LSB, new=0x13/MSB): (0,0)=LUTKK black, (0,1)=LUTKW,
+// (1,0)=LUTWK, (1,1)=LUTWW white. This is the byte-exact stock set;
+// CrossPoint's overlay-mask representation is converted to these absolute
+// selectors before upload rather than modifying the waveform.
 constexpr uint8_t GRAY_LUT_LEN = 42;  // 0x2A data bytes, command sent separately
 struct GrayLut {
   uint8_t cmd;
@@ -55,6 +59,13 @@ const GrayLut kGrayLuts[5] = {
     {0x23, {0x20, 0x02, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},  // LUTWK
     {0x24, {0x00, 0x02, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},  // LUTKK (black)
 };
+
+// Separate dark gray from light gray for both text and image grayscale.
+// UC8179 datasheet R23h: each group is [rail selectors, four frame counts,
+// repeat count]. Shorten the VDL phase from two frames to one, moving that
+// frame to the following GND phase so the group remains six frames long.
+// Other rails, groups, and the light-gray/VCOM/black/white tables stay stock.
+constexpr uint8_t kDarkGrayLut[GRAY_LUT_LEN] = {0x20, 0x02, 0x01, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
 
 // OEM XTF_PRE_BW_MID conditioning waveform. Each row is command-prefixed:
 // byte 0 selects LUT register 0x20..0x24 and the remaining 42 bytes are data.
@@ -156,7 +167,60 @@ void Uc8179Driver::initController(EpdBus& bus) {
   _absoluteGrayPlanes = false;
 }
 
+void Uc8179Driver::configureDirectGrayscale(EpdBus& bus) {
+  if (_directGrayConfigured) return;
+  if (_isScreenOn) {
+    bus.cmd(CMD_POWER_OFF);
+    bus.waitBusy(" 8179_direct_setup_POF");
+  }
+  bus.reset(50);
+  initController(bus);
+  // OEM gray_full packet loader (FUN_4214d79c), with the panel's PSR/SHL.
+  const auto* config = kUc8179DirectGrayConfig;
+  bus.cmd(0x52);
+  bus.data(static_cast<uint8_t>((config[0] & 8) | (config[1] >> 6)));
+  bus.cmd(0x30);
+  bus.data(static_cast<uint8_t>(config[0] >> 4));
+  bus.cmd(0x01);
+  bus.data(0x17);
+  bus.data(static_cast<uint8_t>(config[0] & 7));
+  bus.data(static_cast<uint8_t>(config[1] & 0x3F));
+  bus.data(static_cast<uint8_t>(config[2] & 0x3F));
+  bus.data(static_cast<uint8_t>(config[3] & 0x3F));
+  bus.cmd(0x2A);
+  bus.data(static_cast<uint8_t>(config[2] & 0xC0));
+  bus.data(config[4]);
+  bus.cmd(0x82);
+  bus.data(config[5]);
+  bus.cmdData2(CMD_VCOM_DATA_INTERVAL, _cfg.cdiActive, CDI_INTERVAL);
+  _directGrayConfigured = true;
+}
+
+void Uc8179Driver::restoreBwConfiguration(EpdBus& bus) {
+  if (!_directGrayConfigured) return;
+  if (_isScreenOn) {
+    bus.cmd(CMD_POWER_OFF);
+    bus.waitBusy(" 8179_direct_exit_POF");
+  }
+  // Reset the full-gray power/PLL registers before the OTP or overlay path.
+  bus.reset(50);
+  initController(bus);
+  _directGrayConfigured = false;
+  _needFullClear = true;
+  _oldPlaneValid = false;
+  _redriveAfterGray = false;
+}
+
 void Uc8179Driver::begin(EpdBus& bus) {
+  _textAa.allocate(BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX4Pro || BoardConfig::isX4Classic(), _wb,
+                   _h);
+  _directGrayOnPanel = false;
+  _directGrayConfigured = false;
+  _directGrayPass = false;
+  _directGrayPlanes = 0;
+  _needFullClear = true;
+  _oldPlaneValid = false;
+  _redriveAfterGray = false;
 #if defined(BOARD_HAS_PSRAM)
   if (_grayBase == nullptr) {
     _grayBase = static_cast<uint8_t*>(heap_caps_malloc(_bufferSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -181,6 +245,12 @@ void Uc8179Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, 
 
 void Uc8179Driver::transitionGrayscaleBase(EpdBus& bus, const uint8_t* fb, bool turnOff) {
   if (!fb) return;
+  const bool pending = transitionGrayscaleBaseStart(bus, fb);
+  transitionGrayscaleBaseFinish(bus, fb, turnOff, pending);
+}
+
+bool Uc8179Driver::transitionGrayscaleBaseStart(EpdBus& bus, const uint8_t* fb) {
+  _textAa.invalidate();
   _grayBaseValid = false;
   _absoluteGrayPlanes = false;
   if (_grayBase != nullptr) {
@@ -193,7 +263,11 @@ void Uc8179Driver::transitionGrayscaleBase(EpdBus& bus, const uint8_t* fb, bool 
   // base. XTF_PRE_BW_MID drives that real transition without the OTP GC flash.
   streamPlane(bus, CMD_DTM2, fb);
   _bwPlanesSynced = false;
-  runGrayscalePrecondition(bus);
+  return startGrayscalePrecondition(bus);
+}
+
+void Uc8179Driver::transitionGrayscaleBaseFinish(EpdBus& bus, const uint8_t* fb, bool turnOff, bool pending) {
+  if (pending) finishGrayscalePrecondition(bus);
 
   // Keep the generic B/W baseline coherent in case no AA pass follows (Home or
   // a menu). An AA upload may immediately overwrite these planes; its cached
@@ -220,9 +294,9 @@ void Uc8179Driver::displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, RefreshM
   // XTF_PRE_BW_MID as the page transition itself. Our former extra equal-plane
   // pass caused the visible gray muddling seen in hardware testing and did not
   // discharge the AA residue left by the preceding page.
-  // Half is the explicit charge-scrub request. Keep it as a real B/W activation
-  // instead of replacing it with the differential stock AA transition.
-  if (fallback == RefreshMode::Half || !_grayRefreshedOnce || !_oldPlaneValid || _needFullClear) {
+  // Explicit Full/Half requests must remain real B/W clearing activations.
+  // Only Fast may be replaced by the differential stock AA transition.
+  if (fallback != RefreshMode::Fast || !_grayRefreshedOnce || !_oldPlaneValid || _needFullClear) {
     display(bus, fb, nullptr, fallback, turnOff);
     return;
   }
@@ -230,37 +304,70 @@ void Uc8179Driver::displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, RefreshM
   transitionGrayscaleBase(bus, fb, turnOff);
 }
 
+bool Uc8179Driver::displayGrayscaleBaseStart(EpdBus& bus, const uint8_t* fb, RefreshMode fallback, bool turnOff) {
+  if (!fb) return false;
+  _absoluteInput = false;
+  _directGrayPass = false;
+  _directGrayPlanes = 0;
+  if (fallback != RefreshMode::Fast || !_grayRefreshedOnce || !_oldPlaneValid || _needFullClear)
+    return displayStart(bus, fb, nullptr, fallback, turnOff);
+  _pendingGrayPre = transitionGrayscaleBaseStart(bus, fb);
+  _pendingGrayBase = true;
+  _pendingTurnOff = turnOff;
+  _pendingRefresh = true;
+  return true;
+}
+
 // Stream a framebuffer into RAM plane `ramCmd`, mirrored vertically via row
 // reversal. SHL in PSR handles the horizontal panel direction for FreeInk's
 // framebuffer convention. White padding fills the non-visible gates.
 void Uc8179Driver::streamPlane(EpdBus& bus, uint8_t ramCmd, const uint8_t* fb, bool invert) {
-  if (invert) {
-    bus.sendPlaneFlippedInverted(ramCmd, fb, _h, _wb);
-  } else {
-    bus.sendPlaneFlipped(ramCmd, fb, _h, _wb);
+  uint8_t row[128];
+  const uint16_t wb = _wb <= sizeof(row) ? _wb : sizeof(row);
+  bus.cmd(ramCmd);
+  auto txn = bus.beginTxn();
+  for (int y = static_cast<int>(_h) - 1; y >= 0; y--) {
+    const uint8_t* src = fb + static_cast<uint32_t>(y) * _wb;
+    if (invert) {
+      for (uint16_t offset = 0; offset < _wb;) {
+        const uint16_t n = static_cast<uint16_t>(_wb - offset) < sizeof(row) ? static_cast<uint16_t>(_wb - offset)
+                                                                             : static_cast<uint16_t>(sizeof(row));
+        for (uint16_t x = 0; x < n; x++) row[x] = static_cast<uint8_t>(~src[offset + x]);
+        txn.writeBytes(row, n);
+        offset = static_cast<uint16_t>(offset + n);
+      }
+    } else {
+      txn.writeBytes(src, _wb);
+    }
   }
-  uint8_t whiteRow[128];
-  const uint16_t wb = _wb <= sizeof(whiteRow) ? _wb : sizeof(whiteRow);
-  memset(whiteRow, 0xFF, wb);
-  for (uint16_t y = _h; y < _tresH; y++) bus.data(whiteRow, wb);
+  // Keep padding in the same burst as the visible plane. Opening a separate
+  // SPI transaction for each of the 120 padding rows adds avoidable overhead.
+  memset(row, 0xFF, wb);
+  for (uint16_t y = _h; y < _tresH; y++) txn.writeBytes(row, wb);
 }
 
 void Uc8179Driver::streamPlaneXor(EpdBus& bus, uint8_t ramCmd, const uint8_t* lhs, const uint8_t* rhs) {
   uint8_t row[128];
   const uint16_t wb = _wb <= sizeof(row) ? _wb : sizeof(row);
   bus.cmd(ramCmd);
-  bus.beginTxn();
+  auto txn = bus.beginTxn();
   for (int y = static_cast<int>(_h) - 1; y >= 0; y--) {
     const uint32_t offset = static_cast<uint32_t>(y) * _wb;
     for (uint16_t x = 0; x < wb; x++) row[x] = static_cast<uint8_t>(lhs[offset + x] ^ rhs[offset + x]);
-    bus.rawWriteBytes(row, wb);
+    txn.writeBytes(row, wb);
   }
-  bus.endTxn();
   memset(row, 0xFF, wb);
-  for (uint16_t y = _h; y < _tresH; y++) bus.data(row, wb);
+  for (uint16_t y = _h; y < _tresH; y++) txn.writeBytes(row, wb);
 }
 
 bool Uc8179Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
+  _textAa.invalidate();
+  const bool paintDestination = _directGrayOnPanel;
+  _directGrayOnPanel = false;
+  restoreBwConfiguration(bus);
+  _absoluteInput = false;
+  _directGrayPass = false;
+  _directGrayPlanes = 0;
   (void)prev;
   _bwPlanesSynced = false;
   _absoluteGrayPlanes = false;
@@ -292,6 +399,14 @@ bool Uc8179Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* p
   const bool scrub = (mode == RefreshMode::Half);
   const bool fast = (mode == RefreshMode::Fast) && !scrub && !_needFullClear && _oldPlaneValid;
 
+  if (paintDestination) {
+    streamPlane(bus, CMD_DTM1, fb, true);
+    streamPlane(bus, CMD_DTM2, fb);
+    startBwRefresh(bus, true);
+    bus.waitRefreshComplete(" 8179_BW_TARGET_DRF");
+    bus.cmd(CMD_PARTIAL_OUT);
+  }
+
   // NEW plane (0x13) = new frame.
   streamPlane(bus, CMD_DTM2, fb);
   if (!fast) {
@@ -301,17 +416,21 @@ bool Uc8179Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* p
       streamPlane(bus, CMD_DTM1, fb, /*invert=*/true);
     } else {
       // Full/forced-first flash retains the known absolute-from-white behavior.
-      uint8_t whiteRow[128];
-      const uint16_t wb = _wb <= sizeof(whiteRow) ? _wb : sizeof(whiteRow);
-      memset(whiteRow, 0xFF, wb);
-      bus.cmd(CMD_DTM1);
-      for (uint16_t y = 0; y < _tresH; y++) bus.data(whiteRow, wb);
+      bus.fillPlane(CMD_DTM1, 0xFF, _tresH, _wb);
     }
   }
   // (Ordinary Fast: OLD still holds the previous frame from displayFinish.)
   // A completed ordinary refresh supersedes any pending post-AA transition.
   _redriveAfterGray = false;
 
+  startBwRefresh(bus, fast);
+  _pendingPartial = fast;
+  _pendingTurnOff = turnOff;
+  _pendingRefresh = true;
+  return true;
+}
+
+void Uc8179Driver::startBwRefresh(EpdBus& bus, bool fast) {
   // --- Refresh setup (exact OEM order) -----------------------------------------
   bus.cmd(CMD_VCOM_DATA_INTERVAL);
   bus.data(_cfg.cdiActive);  // 0x29
@@ -347,15 +466,17 @@ bool Uc8179Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* p
     const unsigned long t0 = millis();
     while (digitalRead(busyPin) == HIGH && millis() - t0 < 50) delay(1);
   }
-  _pendingPartial = fast;
-  _pendingTurnOff = turnOff;
-  _pendingRefresh = true;
-  return true;
 }
 
 void Uc8179Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   if (!_pendingRefresh) return;
   _pendingRefresh = false;
+  if (_pendingGrayBase) {
+    _pendingGrayBase = false;
+    transitionGrayscaleBaseFinish(bus, fb, _pendingTurnOff, _pendingGrayPre);
+    _pendingGrayPre = false;
+    return;
+  }
 
   bus.waitRefreshComplete(" 8179_DRF");
   if (_pendingPartial) bus.cmd(CMD_PARTIAL_OUT);  // PTOUT closes the partial window
@@ -380,6 +501,10 @@ void Uc8179Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
 }
 
 void Uc8179Driver::requestResync(uint8_t settlePasses) {
+  _textAa.invalidate();
+  _absoluteInput = false;
+  _directGrayPass = false;
+  _directGrayPlanes = 0;
   (void)settlePasses;
   _needFullClear = true;  // next refresh does a full flash to clear ghosting
 }
@@ -387,6 +512,11 @@ void Uc8179Driver::requestResync(uint8_t settlePasses) {
 void Uc8179Driver::skipInitialResync() { _needFullClear = false; }
 
 void Uc8179Driver::deepSleep(EpdBus& bus) {
+  _textAa.invalidate();
+  _directGrayOnPanel = false;
+  _absoluteInput = false;
+  _directGrayPass = false;
+  _directGrayPlanes = 0;
   _grayBaseValid = false;
   _absoluteGrayPlanes = false;
   if (_isScreenOn) {
@@ -404,22 +534,20 @@ void Uc8179Driver::deepSleep(EpdBus& bus) {
 // masks are converted below to Factory.bin's absolute plane0/plane1 encoding;
 // the resulting (DTM1,DTM2) pair selects the WW/BW/WB/BB LUT per pixel.
 void Uc8179Driver::runGrayscalePrecondition(EpdBus& bus) {
+  if (startGrayscalePrecondition(bus)) finishGrayscalePrecondition(bus);
+}
+
+bool Uc8179Driver::startGrayscalePrecondition(EpdBus& bus) {
   // Factory.bin skips XTF_PRE_BW_MID for its first AA page. Callers must have
   // retained the previous B/W base in DTM1 and loaded the new base into DTM2.
-  if (!_oldPlaneValid || !_grayRefreshedOnce) return;
+  if (!_oldPlaneValid || !_grayRefreshedOnce) return false;
 
   bus.waitBusy(" 8179_gray_pre_ready");
   bus.cmd(CMD_PARTIAL_IN);
   const uint16_t xEnd = static_cast<uint16_t>(_w - 1);
   const uint16_t yEnd = static_cast<uint16_t>(_h - 1);
-  const uint8_t fullWindow[9] = {0x00,
-                                 0x00,
-                                 static_cast<uint8_t>(xEnd >> 8),
-                                 static_cast<uint8_t>(xEnd | 0x07),
-                                 0x00,
-                                 0x00,
-                                 static_cast<uint8_t>(yEnd >> 8),
-                                 static_cast<uint8_t>(yEnd),
+  const uint8_t fullWindow[9] = {0x00, 0x00, static_cast<uint8_t>(xEnd >> 8), static_cast<uint8_t>(xEnd | 0x07),
+                                 0x00, 0x00, static_cast<uint8_t>(yEnd >> 8), static_cast<uint8_t>(yEnd),
                                  0x01};
   bus.cmdData(CMD_PARTIAL_WINDOW, fullWindow, sizeof(fullWindow));
   bus.cmd(CMD_PANEL_SETTING);
@@ -447,7 +575,11 @@ void Uc8179Driver::runGrayscalePrecondition(EpdBus& bus) {
     _isScreenOn = true;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
-  bus.waitBusy(" 8179_gray_pre_DRF");
+  return true;
+}
+
+void Uc8179Driver::finishGrayscalePrecondition(EpdBus& bus) {
+  bus.waitRefreshComplete(" 8179_gray_pre_DRF");
   bus.cmd(CMD_PARTIAL_OUT);
   bus.cmd(CMD_VCOM_DATA_INTERVAL);
   bus.data(_cfg.cdiIdle);
@@ -466,8 +598,55 @@ void Uc8179Driver::preconditionGrayscale(EpdBus& bus, uint16_t x, uint16_t y, ui
   (void)h;
 }
 
+void Uc8179Driver::beginGrayscale(EpdBus& bus, const uint8_t* fb, GrayscaleMode mode, RefreshMode fallback,
+                                  bool turnOff) {
+  if (mode == GrayscaleMode::Overlay && _readerRefresh && _textAa.ready()) {
+    restoreBwConfiguration(bus);
+    _directGrayPass = false;
+    _directGrayPlanes = 0;
+    if (fallback != RefreshMode::Fast || _needFullClear) display(bus, fb, nullptr, fallback, false);
+    _absoluteInput = false;
+    _textAa.begin(fb);
+    return;
+  }
+  _textAa.invalidate();
+  if (mode == GrayscaleMode::Direct) {
+    configureDirectGrayscale(bus);
+    _absoluteInput = true;
+    _directGrayPass = true;
+    // Map canonical VCOM/black/light/dark/white rows to absolute selectors.
+    static constexpr uint8_t rows[5] = {0, 4, 2, 3, 1};
+    for (uint8_t t = 0; t < 5; ++t) {
+      bus.cmd(0x20 + t);
+      const auto* source = kUltraChipDirectGray[rows[t]];
+      bus.data(source, GRAY_LUT_LEN);
+    }
+    _directGrayPlanes = 0;
+    _grayBaseValid = false;
+    _absoluteGrayPlanes = false;
+    _oldPlaneValid = false;
+    _bwPlanesSynced = false;
+    _needFullClear = true;
+    _redriveAfterGray = false;
+    return;
+  }
+  _absoluteInput = false;
+  _directGrayPass = false;
+  _directGrayPlanes = 0;
+  displayGrayscaleBase(bus, fb, fallback, turnOff);
+  _absoluteInput = mode == GrayscaleMode::Absolute;
+}
+
 void Uc8179Driver::copyGrayscaleLsb(EpdBus& bus, const uint8_t* lsb) {
+  if (_textAa.active()) { _textAa.stage(0, lsb, 0, _h); return; }
   if (!lsb) return;
+  if (_absoluteInput) {
+    bus.waitBusy(" absolute plane");
+    streamPlane(bus, CMD_DTM1, lsb, false);
+    if (_directGrayPass) _directGrayPlanes |= 1;
+    _bwPlanesSynced = false;
+    return;
+  }
   bus.waitBusy(" 8179_gray_lsb");  // prior base refresh must finish before RAM writes
   _absoluteGrayPlanes = false;
   if (_grayBaseValid) {
@@ -492,7 +671,15 @@ void Uc8179Driver::copyGrayscaleLsb(EpdBus& bus, const uint8_t* lsb) {
 }
 
 void Uc8179Driver::copyGrayscaleMsb(EpdBus& bus, const uint8_t* msb) {
+  if (_textAa.active()) { _textAa.stage(1, msb, 0, _h); return; }
   if (!msb) return;
+  if (_absoluteInput) {
+    bus.waitBusy(" absolute plane");
+    streamPlane(bus, CMD_DTM2, msb, false);
+    if (_directGrayPass) _directGrayPlanes |= 2;
+    _bwPlanesSynced = false;
+    return;
+  }
   bus.waitBusy(" 8179_gray_msb");
   if (_absoluteGrayPlanes) {
     // With plane0=(base|maskLsb), stock plane1 is plane0 XOR maskMsb:
@@ -510,20 +697,95 @@ void Uc8179Driver::copyGrayscaleMsb(EpdBus& bus, const uint8_t* msb) {
   }
 }
 
+void Uc8179Driver::writeGrayscalePlaneStrip(EpdBus& bus, GrayPlane plane, const uint8_t* rows,
+                                                   uint16_t yStart, uint16_t numRows) {
+  _textAa.stage(plane == GrayPlane::Msb, rows, yStart, numRows);
+  if (!_textAa.active() && _textAa.planeComplete(plane == GrayPlane::Msb)) {
+    if (plane == GrayPlane::Lsb) copyGrayscaleLsb(bus, _textAa.low());
+    else copyGrayscaleMsb(bus, _textAa.high());
+  }
+}
+
+bool Uc8179Driver::displayGrayscaleWindow(EpdBus& bus, const uint8_t* fb, uint16_t x, uint16_t y, uint16_t w,
+                                          uint16_t h) {
+  if (!_textAa.beginWindow(fb, x, y, w, h)) return false;
+  displayGray(bus, fb, /*turnOff=*/true, nullptr, /*factoryMode=*/false);
+  return _textAa.onPanel();
+}
+
 void Uc8179Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, const unsigned char* lut,
                                bool factoryMode) {
+  if (_textAa.active()) {
+    if (!_textAa.compose()) { _textAa.invalidate(); _needFullClear = true; return; }
+    bus.waitBusy("8179 text ready");
+    streamPlane(bus, CMD_DTM1, _textAa.low());
+    streamPlane(bus, CMD_DTM2, _textAa.high());
+    bus.cmd(CMD_PANEL_SETTING);
+    bus.data(_cfg.psr0);
+    bus.data(_cfg.psr1);
+    bus.cmd(CMD_PFS);
+    bus.data(0x20);
+    bus.cmd(CMD_GATE_SCAN);
+    bus.data(2);
+    for (unsigned i = 0; i < 5; ++i) {
+      bus.cmd(0x20 + i);
+      bus.data(kX4ProTextUc8179 + i * 42, 42);
+    }
+    bus.cmd(CMD_VCOM_DATA_INTERVAL);
+    bus.data(0x29);
+    bus.data(7);
+    if (!_isScreenOn) { bus.cmd(CMD_POWER_ON); bus.waitBusy("8179 text power"); _isScreenOn = true; }
+    bus.cmd(CMD_DISPLAY_REFRESH);
+    bus.waitRefreshComplete("UC8179 one-pass text AA");
+    if (bus.isBusy()) { _textAa.invalidate(); _needFullClear = true; return; }
+    _grayRefreshedOnce = true;
+    _textAa.finish(20, -1, -1, -22);
+    _needFullClear = false;
+    _oldPlaneValid = false;
+    _bwPlanesSynced = false;
+    _redriveAfterGray = true;
+    if (turnOff) {
+      bus.cmd(CMD_POWER_OFF);
+      bus.waitBusy("text AA power off");
+      _isScreenOn = false;
+    }
+    return;
+  }
+
   // fb = the reader's current frame; used to re-seed the B/W baseline below.
-  (void)lut;          // waveform comes from the built-in gray LUT set (kGrayLuts)
-  (void)factoryMode;  // 4-level is absolute (defined by the planes)
-  (void)turnOff;      // Factory.bin gray_aa leaves analog power enabled
+  (void)lut;  // waveform comes from the built-in gray LUT set (kGrayLuts)
 
   // The base refresh must be fully complete before we upload LUTs / stream — the
   // controller drops LUT/DTM/DRF writes while BUSY.
+  if (_directGrayPass) {
+    if (_directGrayPlanes != 3) return;
+    bus.waitBusy(" 8179_direct_ready");
+    if (!_isScreenOn) {
+      bus.cmd(CMD_POWER_ON);
+      bus.waitBusy(" 8179_direct_PON");
+      _isScreenOn = true;
+    }
+    bus.cmd(CMD_DISPLAY_REFRESH);
+    bus.waitBusy(" 8179_DIRECT_GRAY_DRF");
+    _directGrayOnPanel = true;
+    _directGrayPass = false;
+    _directGrayPlanes = 0;
+    _absoluteInput = false;
+    _needFullClear = true;
+    _oldPlaneValid = false;
+    _redriveAfterGray = false;
+    if (turnOff) {
+      bus.cmd(CMD_POWER_OFF);
+      bus.waitBusy(" 8179_direct_POF");
+      _isScreenOn = false;
+    }
+    return;
+  }
   bus.waitBusy(" 8179_gray_ready");
   _bwPlanesSynced = false;
 
-  // Custom-LUT 4-level grayscale — the EXACT stock gray_aa stream (FUN_4214ec2c),
-  // byte-for-byte apart from FreeInk's SHL orientation bit: PSR 0x3F (REG bit5=1
+  // Custom-LUT grayscale uses the stock gray_aa sequence (FUN_4214ec2c),
+  // with a separate dark-gray table and FreeInk's SHL bit: PSR 0x3F (REG bit5=1
   // custom LUT; the B/W path masks to 0x1F/OTP) -> upload the 5 short LUTs
   // separately, 42 data bytes each) -> CDI 0x29/07 -> PON -> DRF. Unlike the
   // gray_full path, Factory.bin's gray_aa function sends no POF afterward. It
@@ -533,7 +795,7 @@ void Uc8179Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, con
   bus.data(_cfg.psr1);
   for (const auto& l : kGrayLuts) {
     bus.cmd(l.cmd);
-    bus.data(l.data, GRAY_LUT_LEN);
+    bus.data(l.cmd == 0x23 ? kDarkGrayLut : l.data, GRAY_LUT_LEN);
   }
   bus.cmd(CMD_VCOM_DATA_INTERVAL);
   // Factory.bin FUN_4214ec2c calls vtable +0x118 unconditionally; the UC8179
@@ -543,13 +805,26 @@ void Uc8179Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, con
   bus.data(CDI_INTERVAL);
   _grayRefreshedOnce = true;
 
+  // Absolute images start from a black/white base. Give the short gray AA LUTs
+  // 25% longer to move their gray pixels toward white, then restore the stock
+  // rate so ordinary black/white refresh timing is unchanged.
+  const bool slowerImageWaveform = factoryMode && _absoluteInput;
+  if (slowerImageWaveform) {
+    bus.cmd(CMD_PLL_CONTROL);
+    bus.data(PLL_40_HZ);
+  }
+
   if (!_isScreenOn) {
     bus.cmd(CMD_POWER_ON);
     bus.waitBusy(" 8179_gray_PON");
     _isScreenOn = true;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
-  bus.waitBusy(" 8179_gray_DRF");
+  bus.waitBusy(" 8179_gray_split_DRF");
+  if (slowerImageWaveform) {
+    bus.cmd(CMD_PLL_CONTROL);
+    bus.data(PLL_50_HZ);
+  }
   // Deliberately remain powered. FUN_4214ec2c returns after DRF and RAM/base
   // bookkeeping without issuing command 0x02; deepSleep() still powers down.
   // Its bookkeeping writes the clean B/W base to BOTH DTM1 and DTM2. Besides
@@ -571,12 +846,41 @@ void Uc8179Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, con
   // stock's non-flashing transition; an explicit Half remains the strong purge.
   (void)fb;
   _redriveAfterGray = true;
+  _absoluteInput = false;
+  _directGrayPass = false;
+  _directGrayPlanes = 0;
+  if (factoryMode && turnOff && _isScreenOn) {
+    bus.cmd(CMD_POWER_OFF);
+    bus.waitBusy(" 8179_absolute_POF");
+    _isScreenOn = false;
+  }
 }
 
 void Uc8179Driver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
+  if (_textAa.active()) {
+    // A skipped AA pass still owes the caller its deferred B/W page.
+    display(bus, bw ? bw : _textAa.base(), nullptr, RefreshMode::Fast, true);
+    return;
+  }
+  if (_textAa.onPanel()) {
+    streamPlane(bus, CMD_DTM1, _textAa.high());
+    streamPlane(bus, CMD_DTM2, _textAa.high());
+    _oldPlaneValid = true;
+    return;
+  }
+
   bus.waitBusy(" 8179_gray_cleanup");
+  _absoluteInput = false;
+  _directGrayPass = false;
+  _directGrayPlanes = 0;
   _grayBaseValid = false;
   _absoluteGrayPlanes = false;
+  if (_directGrayConfigured) {
+    _needFullClear = true;
+    _oldPlaneValid = false;
+    _bwPlanesSynced = false;
+    return;
+  }
   if (!bw) {
     // No baseline provided — fall back to a full flash on the next B/W refresh.
     _needFullClear = true;
@@ -590,7 +894,7 @@ void Uc8179Driver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
   streamPlane(bus, CMD_DTM2, bw);
   _oldPlaneValid = true;
   _bwPlanesSynced = true;
-  _needFullClear = false;
+  // RAM restoration does not cancel a requested physical clean.
 }
 
 // Per-board config injection, same idiom as the other drivers: define

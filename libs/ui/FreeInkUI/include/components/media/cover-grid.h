@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+
 #include "../../FreeInkUICore.h"
 
 namespace freeink {
@@ -33,6 +35,8 @@ enum class CoverGridSelectionIndicator {
   CoverFrame,
 };
 
+enum class CoverGridColumnLayout : uint8_t { EqualWidth, SpaceBetween };
+
 struct CoverGridProps {
   const CoverGridItem* items = nullptr;
   CoverGridItemProvider itemProvider = nullptr;
@@ -46,6 +50,7 @@ struct CoverGridProps {
   StyleSet cellStyles{};
   CoverGridSelectionIndicator selectionIndicator = CoverGridSelectionIndicator::Cell;
   uint8_t columns = 3;
+  CoverGridColumnLayout columnLayout = CoverGridColumnLayout::EqualWidth;
   Size coverSize{72, 104};
   int16_t rowHeight = 132;
   int16_t gap = 8;
@@ -54,6 +59,9 @@ struct CoverGridProps {
   Insets labelInset{};
   int16_t labelHeight = 20;
   int16_t labelGap = 2;
+  TextAlign labelAlign = TextAlign::Center;
+  // Constrain the label to the cover slot rather than the full cell content.
+  bool labelFollowsCover = false;
   int16_t minTouchSize = 44;
   bool scrollIndicator = true;
   int16_t scrollIndicatorWidth = 3;
@@ -64,6 +72,34 @@ struct CoverGridProps {
   CoverGridCoverPainter coverPainter = nullptr;
   void* coverPainterUserData = nullptr;
 };
+
+inline bool fitCoverGrid(Rect rect, int count, int lineHeight,
+                         int maxCoverHeight, CoverGridProps &grid) {
+  if (rect.empty() || count <= 0 || grid.columns == 0 || lineHeight <= 0)
+    return false;
+  grid.gap = std::max<int16_t>(0, grid.gap);
+  grid.rowGap = grid.rowGap < 0 ? grid.gap : grid.rowGap;
+  grid.labelHeight = static_cast<int16_t>(
+      lineHeight * (grid.titleText.maxLines ? grid.titleText.maxLines : 1));
+  const int labelSpace = grid.labelHeight + grid.labelGap + 8;
+  const int desiredRows = (count + grid.columns - 1) / grid.columns;
+  // Keep full rows visible; short landscape slots scroll rather than cropping
+  // labels.
+  const int fittingRows =
+      (rect.height + grid.rowGap) / (24 + labelSpace + grid.rowGap);
+  const int rows = std::max(1, std::min(desiredRows, fittingRows));
+  const int rowHeight = (rect.height - (rows - 1) * grid.rowGap) / rows;
+  const int cellWidth =
+      (rect.width - (grid.columns - 1) * grid.gap) / grid.columns;
+  const int height = std::min(
+      {maxCoverHeight, rowHeight - labelSpace, (cellWidth - 12) * 3 / 2});
+  if (height < 1)
+    return false;
+  grid.coverSize = {static_cast<int16_t>(height * 2 / 3),
+                    static_cast<int16_t>(height)};
+  grid.rowHeight = static_cast<int16_t>(height + labelSpace);
+  return true;
+}
 
 inline uint16_t coverGridVisibleCells(Rect rect, const uint8_t columns, const int16_t rowHeight, const int16_t rowGap) {
   if (columns == 0 || rowHeight <= 0) return 0;
@@ -104,21 +140,32 @@ void coverGrid(Frame<MaxInteractions>& frame, Rect rect, const CoverGridProps& p
     }
     const int16_t thumbH = static_cast<int16_t>(thumbHeight);
     const int32_t scrollRange = props.count - cellsVisible;
+    // Page-aligned tops exceed scrollRange when the last page is partial.
+    const int32_t thumbTop = props.topIndex < scrollRange ? props.topIndex : scrollRange;
     const int16_t thumbY = static_cast<int16_t>(
-        track.y + (scrollRange > 0 ? (static_cast<int32_t>(track.height - thumbH) * props.topIndex) / scrollRange
+        track.y + (scrollRange > 0 ? (static_cast<int32_t>(track.height - thumbH) * thumbTop) / scrollRange
                                    : 0));
     frame.target().fill(Rect{static_cast<int16_t>(track.x - props.scrollIndicatorWidth), thumbY,
                              props.scrollIndicatorWidth, thumbH},
                         Paint::solid(Color::Black));
   }
-  const int16_t cellW = static_cast<int16_t>((gridRect.width - (props.columns - 1) * props.gap) / props.columns);
+  const int16_t naturalCellW = props.coverSize.width + props.cellInset.left + props.cellInset.right;
+  const bool distribute = props.columnLayout == CoverGridColumnLayout::SpaceBetween && naturalCellW > 0 &&
+                          static_cast<int32_t>(naturalCellW) * props.columns +
+                              static_cast<int32_t>(props.columns - 1) * props.gap <= gridRect.width;
+  const int16_t cellW = distribute ? naturalCellW
+      : static_cast<int16_t>((gridRect.width - (props.columns - 1) * props.gap) / props.columns);
   uint16_t top = props.topIndex;
   if (top >= props.count) top = 0;
   for (uint16_t visible = 0; visible < cellsVisible && top + visible < props.count; ++visible) {
     const uint16_t index = static_cast<uint16_t>(top + visible);
     const uint8_t col = static_cast<uint8_t>(visible % props.columns);
     const uint16_t row = static_cast<uint16_t>(visible / props.columns);
-    Rect cell{static_cast<int16_t>(gridRect.x + col * (cellW + props.gap)),
+    const int16_t columnOffset = distribute
+        ? static_cast<int16_t>(props.columns > 1 ? static_cast<int32_t>(col) * (gridRect.width - cellW) / (props.columns - 1)
+                                                : (gridRect.width - cellW) / 2)
+        : static_cast<int16_t>(col * (cellW + props.gap));
+    Rect cell{static_cast<int16_t>(gridRect.x + columnOffset),
               static_cast<int16_t>(gridRect.y + row * strideY), cellW, props.rowHeight};
     const CoverGridItem providedItem =
         props.itemProvider ? props.itemProvider(index, props.itemProviderUserData) : CoverGridItem{};
@@ -166,10 +213,11 @@ void coverGrid(Frame<MaxInteractions>& frame, Rect rect, const CoverGridProps& p
     }
     if (item.title && props.labelHeight > 0) {
       TextStyle title = textStyleWithForeground(props.titleText, style.foreground);
-      title.align = TextAlign::Center;
+      title.align = props.labelAlign;
       title.maxLines = title.maxLines > 0 ? title.maxLines : 1;
-      Rect labelRect{content.x, static_cast<int16_t>(coverRect.bottom() + props.labelGap), content.width,
-                     props.labelHeight};
+      Rect labelRect{props.labelFollowsCover ? coverRect.x : content.x,
+                     static_cast<int16_t>(coverRect.bottom() + props.labelGap),
+                     props.labelFollowsCover ? coverRect.width : content.width, props.labelHeight};
       labelRect = labelRect.inset(props.labelInset);
       if (!labelRect.empty()) {
         const int16_t reservedHeight = static_cast<int16_t>(frame.target().lineHeight(title.font) * title.maxLines);

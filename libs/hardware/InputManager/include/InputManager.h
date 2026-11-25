@@ -20,6 +20,8 @@ class InputManager {
  public:
   InputManager();
   void begin();
+  // A4: stop touch and release the shared I2C bus after all other bus users finish.
+  bool prepareForDeepSleep();
   uint8_t getState();
 
   // Call regularly from the main loop to update button and touch edge state.
@@ -31,6 +33,9 @@ class InputManager {
   // Current electrical level of the configured power-button GPIO, before
   // logical click/hold classification. False when the board has no such GPIO.
   bool isPowerButtonPhysicallyPressed() const;
+
+  // Sample the ADC ladder without polling touch or changing debounced button state.
+  bool isAdcLadderPhysicallyPressed();
 
   // Press edge since the previous update().
   bool wasPressed(uint8_t buttonIndex) const;
@@ -56,6 +61,7 @@ class InputManager {
   unsigned long getHeldTime() const;
 
   // Duration of the current or most recent power-button hold.
+  // PMIC click pulses report zero, independent of the interval between updates.
   unsigned long getPowerButtonHeldTime() const;
 
   static constexpr uint8_t BTN_BACK = 0;
@@ -88,10 +94,14 @@ class InputManager {
   };
 
   // Fixed-size contact snapshot for allocation-free multi-touch polling. `id`
-  // is the GT911 track ID when `idsStable` is true. Coordinate-only GT911
-  // frames expose frame-local record slots instead, so callers must not retain
+  // is the controller's track ID (GT911) when `idsStable` is true.
+  // Coordinate-only frames — GT911's coordsAtByte0 variant and the EEGO A4's
+  // GSLX680 (hardware-validated 2026-10-29: record top nibbles are always 0)
+  // — expose frame-local record slots instead, so callers must not retain
   // those IDs across frames. `count` is capped at MAX_TOUCH_CONTACTS;
-  // `reportedCount` keeps the controller's actual count so callers can detect
+  // `reportedCount` keeps the frame's actual on-glass contact count (on
+  // GSLX680 the raw controller count also carries home-key, past-glass and
+  // padding records, which are filtered per-contact) so callers can detect
   // truncation and opt into only the contact counts they support.
   static constexpr uint8_t MAX_TOUCH_CONTACTS = 4;
   struct MultiTouchPoint {
@@ -107,11 +117,13 @@ class InputManager {
 
   // True if this board has a touch controller configured.
   bool hasTouch() const;
-  // True only while a GT911 controller is present. Other touch controllers
-  // retain their existing single-contact contract.
+  // True while a GT911 or GSLX680 controller is present, or when the Picco
+  // TMA525C's GET_SYSINFO confirms multiple contacts. Other touch
+  // controllers retain their existing single-contact contract.
   bool supportsMultiTouch() const;
-  // Latest GT911 contacts, capped at MAX_TOUCH_CONTACTS. Gesture consumers
-  // should check reportedCount for the exact cardinality they support.
+  // Latest multi-touch contacts (GT911, GSLX680, multi-contact Picco),
+  // capped at MAX_TOUCH_CONTACTS. Gesture consumers should check reportedCount
+  // for the exact cardinality they support.
   TouchSnapshot getTouchSnapshot() const;
   // The most recent touch sampled during #update(). valid == false when idle.
   TouchPoint getTouchPoint() const;
@@ -128,6 +140,15 @@ class InputManager {
   // Press edge with the touch-down position normalized in the panel's native
   // frame.
   bool wasTouchPressedAt(float& nx, float& ny) const;
+  // Off-screen capacitive page keys only; excludes physical buttons sharing
+  // BTN_UP/BTN_DOWN. Bit positions match the button indices.
+  uint8_t capacitivePageButtonMask() const {
+#if FREEINK_CAP_TOUCH
+    return cstVirtualButtons;
+#else
+    return 0;
+#endif
+  }
   // True while the current touch is still a tap candidate: finger down,
   // movement remains within tap slop. Writes the original touch-down position
   // and held time.
@@ -156,6 +177,12 @@ class InputManager {
   // contact centroids, normalized to 0..1. Pinches and sub-threshold turns are
   // rejected, and an accepted rotation cannot also become a translation.
   bool wasMultiTouchRotation(float& degrees, float& nxCenter, float& nyCenter, unsigned long& durationMs) const;
+  // One-shot two-contact pinch/spread on release. `scale` is end separation
+  // divided by start separation (<1.0 = pinch in / zoom out, >1.0 = spread /
+  // zoom in). The center is the average of the start/end contact centroids,
+  // normalized to 0..1. Rotations, tiny scale changes, and ambiguous contacts
+  // are rejected, and an accepted pinch cannot also become a translation.
+  bool wasMultiTouchPinch(float& scale, float& nxCenter, float& nyCenter, unsigned long& durationMs) const;
   // One-shot long-press: fires WHILE the finger is still down, once a
   // stationary contact (within tap slop) has been held TOUCH_LONG_PRESS_MS.
   // Position is the touch-down point, normalized like wasTouchTap. Fires at
@@ -169,10 +196,10 @@ class InputManager {
   // Self-clears; async tap, single-swipe, multi-touch-swipe, and rotation
   // queues are gated by the same latch.
   void suppressTouchContact();
-  // True if a touch press or release happened this frame. Coarse "the user
-  // touched the screen" signal (the touch analogue of wasAnyPressed/Released)
-  // for resetting idle/sleep timers and restoring CPU frequency. False on
-  // non-touch boards.
+  // True if a screen-touch press/release or standalone capacitive home-key
+  // event happened this frame. Coarse touch-input signal (the touch analogue
+  // of wasAnyPressed/Released) for resetting idle/sleep timers and restoring
+  // CPU frequency. False on non-touch boards.
   bool wasTouchActivity() const;
   // True on the press edge of the GT911 capacitive home key (controllers
   // without one never report it). Cleared each #update().
@@ -185,6 +212,38 @@ class InputManager {
   // (~700 ms), while still down — a hold shortcut (e.g. open the reader menu).
   // Cleared each #update().
   bool wasHomeKeyLongPressed() const;
+  // Home key currently held (level, not an edge). A motionless hold produces
+  // no new-data frames, so its long-press threshold is timed by #update()
+  // against the wall clock — a host that stops polling while this is true
+  // stretches that threshold by however long it stayed away.
+  bool isHomeKeyDown() const;
+
+  // --- Slide switch (inert unless BoardConfig::ACTIVE.input.toggleSwitch is set)
+  bool hasToggleSwitch() const { return BoardConfig::ACTIVE.input.toggleSwitch >= 0; }
+  // Debounced switch position; begin() latches the boot position without
+  // raising a change event. False on boards without a switch.
+  bool isToggleSwitchOn() const { return toggleSwitchOn; }
+  // True for the one update() in which the debounced position changed. Under
+  // beginAsync() the task consumes this edge; poll isToggleSwitchOn() instead.
+  bool wasToggleSwitchChanged() const { return toggleSwitchChangedEvent; }
+
+  // Touch INT line usable as a light-sleep wake source, or -1. A host can only
+  // wake from light sleep on a GPIO LEVEL (the edge detector is clock-gated
+  // while asleep), so this reports the pin ONLY once the driver has put the
+  // controller in a level-hold INT mode — the line then stays asserted from the
+  // report frame until the poll clears the status register, which a level wake
+  // cannot miss. -1 whenever that cannot be guaranteed (no touch, probe failed,
+  // FREEINK_GT911_INT_WAKE not built, or the controller refused the mode);
+  // callers must keep polling in that case. Also -1 while the poll cannot
+  // read or clear the status register over I2C: a pending report would then
+  // hold the line asserted indefinitely, so arming it would pin the host
+  // awake. That state is transient (the pin comes back once a poll succeeds),
+  // so query this before each sleep rather than caching it.
+  int8_t touchWakeIrqPin() const;
+  // Asserted level of #touchWakeIrqPin (true = LOW), from the board profile's
+  // TouchConfig::irqActiveLow. The driver only ever programs a low-level hold,
+  // and refuses to report the pin at all on a profile that claims otherwise.
+  bool touchWakeIrqActiveLow() const;
 
   // Optional board hook for buttons that aren't direct GPIOs — e.g. a key
   // behind an I2C IO-expander (the LilyGo T5 S3 user button on its PCA9535). It
@@ -193,6 +252,10 @@ class InputManager {
   // none.
   using ButtonHook = uint8_t (*)();
   static void setButtonHook(ButtonHook hook) { s_buttonHook = hook; }
+  // True once a board has installed such a hook. Lets a host tell that some of
+  // its buttons are NOT readable as GPIO levels — e.g. a GPIO-interrupt idle
+  // wait cannot see them and must keep polling instead.
+  static bool hasButtonHook() { return s_buttonHook != nullptr; }
 
   // Boards such as Sticky wire OK/confirm and power/wake to the same GPIO. By
   // default a short click emits CONFIRM and a hold emits POWER. Apps that
@@ -241,6 +304,10 @@ class InputManager {
   // wasMultiTouchRotation().
   bool popMultiTouchRotation(float& degrees, float& nxCenter, float& nyCenter, unsigned long& durationMs);
 
+  // Pop a queued completed two-contact pinch/spread. Values use the same scale,
+  // normalized center, and duration contract as wasMultiTouchPinch().
+  bool popMultiTouchPinch(float& scale, float& nxCenter, float& nyCenter, unsigned long& durationMs);
+
   // --- Diagnostics -----------------------------------------------------------
   // A live sample of one button-group ADC pin: the raw reading plus the BTN_*
   // it currently classifies as (-1 = no band matched). On the Xteink ADC ladder
@@ -282,6 +349,13 @@ class InputManager {
     uint16_t durationMs;
   };
   QueueHandle_t _asyncMultiTouchRotationQueue = nullptr;
+  struct QueuedMultiTouchPinch {
+    float scale;
+    uint16_t centerX;
+    uint16_t centerY;
+    uint16_t durationMs;
+  };
+  QueueHandle_t _asyncMultiTouchPinchQueue = nullptr;
   TaskHandle_t _asyncTask = nullptr;
   uint32_t _asyncPollMs = 15;
   static void asyncTaskTrampoline(void* self);
@@ -297,11 +371,16 @@ class InputManager {
 
   // Touch backend. Compiled only when FREEINK_CAP_TOUCH is set; dispatches on
   // BoardConfig::ACTIVE.touch.controller (CHSC6x, GT911, or FT5x06/FT6336).
+  // Each driver's definitions exist only when its FREEINK_TOUCH_* flag is set.
   void beginTouch();
   uint8_t serviceTouch();  // runs the machine; returns synthesized button mask
   void updateTouchFromIrq(unsigned long now,
                           int irqRaw);  // CHSC6x I2C poll + touch-bit gate
   void pollGt911(unsigned long now);    // GT911 polled read
+  void beginCst816s();
+  void pollCst816s(unsigned long now);
+  uint8_t cstVirtualButtons = 0;
+  unsigned long cstLastSample = 0;
   void beginFt5x06();
   void pollFt5x06(unsigned long now);
   bool ft5x06WriteReg(uint8_t reg, uint8_t value);
@@ -311,13 +390,35 @@ class InputManager {
   uint16_t mapTouchAxis(uint16_t raw, uint16_t rawMin, uint16_t rawMax, uint16_t outMax) const;
   void beginGt911();
   bool gt911ReadReg(uint16_t reg, uint8_t* buf, uint8_t len);
-  void gt911ClearStatus();
+  bool gt911ClearStatus();
+#if FREEINK_TOUCH_GT911 && FREEINK_GT911_INT_WAKE
+  bool gt911WriteReg(uint16_t reg, const uint8_t* buf, uint8_t len);
+  // Put the INT line in low-level hold mode so it can serve as a light-sleep
+  // wake source; sets touchWakeIrqUsable on success.
+  void gt911ConfigureIntWake();
+  // Status-register access for the INT-wake path: bounded retries, and a
+  // latched fault (gt911StatusFault) while 0x814E cannot be read or cleared,
+  // both only once the INT has been offered (touchWakeIrqUsable).
+  bool gt911ReadStatusForWake(uint8_t& status);
+  void gt911ClearStatusForWake();
+  void gt911SetStatusFault(bool fault);
+  uint8_t gt911StatusTries() const;
+  // 0x814E could not be read or cleared: touchWakeIrqPin() reports -1.
+  bool gt911StatusFault = false;
+#endif  // FREEINK_TOUCH_GT911 && FREEINK_GT911_INT_WAKE
   void beginFt6336u();
   void pollFt6336u(unsigned long now);
   void beginGslx680();
+  void gslInitBody();
+  static void gslInitTask(void* arg);
+  void waitForTouchInit() const;
+  bool gslInitRunning = false;  // GSLX680 boot task still running (EEGO A4)
   void pollGslx680(unsigned long now);
+  static void gslCalibrate(uint16_t rawX, uint16_t rawY, int16_t& screenX, int16_t& screenY);
   bool gslWrite(uint8_t reg, const uint8_t* data, uint8_t len);
   bool gslRead(uint8_t reg, uint8_t* buf, uint8_t len);
+  void beginTma525c();               // Onyx Picco Parade TMA525C (I2C 0x24) init/reset
+  void pollTma525c(unsigned long now);
   bool gslUploadFirmware();
 
   enum class MultiTouchGestureState : uint8_t { Idle, Tracking, Blocked };
@@ -341,7 +442,14 @@ class InputManager {
   bool hasEligibleRotationScale() const;
   bool isMultiTouchTranslation(unsigned long now) const;
   bool classifyMultiTouchRotation(unsigned long now);
+  bool classifyMultiTouchPinch(unsigned long now);
   void normalizeTouchPoint(uint16_t x, uint16_t y, float& nx, float& ny) const;
+
+  void updateToggleSwitch(unsigned long now);
+  bool toggleSwitchOn = false;
+  bool toggleSwitchRaw = false;
+  bool toggleSwitchChangedEvent = false;
+  unsigned long toggleSwitchRawSince = 0;
 
   uint8_t currentState;
   uint8_t lastState;
@@ -361,8 +469,16 @@ class InputManager {
   uint8_t twoButtonPhysicalState;
   unsigned long twoButtonPressStart;
   bool twoButtonLongPressActive;
+  bool twoButtonChordSeen = false;  // both buttons were down during this press
+#if FREEINK_DEVICE_PAPERMONO
+  bool powerButtonClick = false;  // Retained through release; polling latency is not click duration.
+#endif
 
   bool touchDataEnabled = false;         // I2C up, controller present
+  bool touchWakeIrqUsable = false;       // INT held in a level mode (touchWakeIrqPin)
+#if FREEINK_TOUCH_TMA525C
+  uint8_t piccoMaxContacts = 1;  // GET_SYSINFO-confirmed panel capability
+#endif
   uint8_t gt911Addr = 0;                 // resolved GT911 address (0 until probed)
   unsigned long touchIrqPulseUntil = 0;  // synthesized-confirm window after a press
   unsigned long touchReadAt = 0;         // next scheduled I2C poll
@@ -397,6 +513,11 @@ class InputManager {
   uint16_t multiTouchRotationCenterX = 0;
   uint16_t multiTouchRotationCenterY = 0;
   uint16_t multiTouchRotationDurationMs = 0;
+  bool multiTouchPinchEvent = false;
+  float multiTouchPinchScale = 1.0f;
+  uint16_t multiTouchPinchCenterX = 0;
+  uint16_t multiTouchPinchCenterY = 0;
+  uint16_t multiTouchPinchDurationMs = 0;
   TouchPoint touchDownPoint = {false, 0, 0, 0};  // first sample of the current contact (tap routing)
   TouchPoint touchUpPoint = {false, 0, 0, 0};    // last sample before release (swipe routing)
   unsigned long lastTouchHeldDurationMs = 0;     // contact duration, latched at release

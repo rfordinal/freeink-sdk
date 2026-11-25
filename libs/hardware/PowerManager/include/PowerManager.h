@@ -13,7 +13,7 @@
 // This picks the right source at compile time from SoC capability macros, and
 // reads the wake pin + active level from BoardConfig::ACTIVE.input, so the same
 // consumer code deep-sleeps correctly on every supported board. The wake pin must
-// be RTC-capable on ext1 parts (true for the de-link power button).
+// be RTC-capable on ext1 parts (true for the Silkscreen power button).
 
 namespace freeink {
 
@@ -55,6 +55,18 @@ class PowerManager {
 
   // Convenience: wait for release, arm the power-button wakeup, then deep sleep.
   [[noreturn]] static void deepSleepUntilPowerButton();
+
+  // esp_deep_sleep_start() is documented as not returning, but deepSleep()
+  // calls esp_restart() if it ever does (instead of a busy-loop -- see that
+  // function). This reports whether the *previous* boot took that abort
+  // path, and clears the record so it only surfaces once. wakeupCause/
+  // wakePinLevel are the values captured at the moment of the abort.
+  struct AbortedSleepInfo {
+    bool aborted = false;
+    int wakeupCause = 0;
+    int wakePinLevel = 0;
+  };
+  static AbortedSleepInfo takeAbortedSleepInfo();
 };
 
 }  // namespace freeink
