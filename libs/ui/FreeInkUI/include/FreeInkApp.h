@@ -9,6 +9,16 @@
 // design-time tools can generate ordinary C++ against it.
 
 #include <FreeInkUI.h>
+#include <FreeInkUIComponentStyle.h>
+
+// Component style overrides (Screen::setComponentStyle). Its checks read a runtime pointer, so a
+// firmware that never sets a style still carries every override and content-alignment path, the
+// row-measuring loop of listContentHeight() inlined at each list call site: ~3.3 KB of flash in a
+// firmware with four list screens. Building with FREEINK_UI_COMPONENT_STYLE=0 compiles them out,
+// and setComponentStyle() with them.
+#ifndef FREEINK_UI_COMPONENT_STYLE
+#define FREEINK_UI_COMPONENT_STYLE 1
+#endif
 
 #include <atomic>
 #include <memory>
@@ -61,6 +71,9 @@ public:
   const DeviceContext &device() const { return frame_.device(); }
   const ThemeTokens &theme() const { return theme_; }
   Rect contentRect() const { return content_; }
+#if FREEINK_UI_COMPONENT_STYLE
+  void setComponentStyle(const ComponentStyle* style) { componentStyle_ = style; }
+#endif
 
   void setContentMargin(Insets margin) {
     content_ = insetClamped(frame_.safeRect(), margin);
@@ -157,6 +170,9 @@ public:
       themed.trailingStyles = plainStyles(Paint::solid(Color::Black));
     if (textStyleUnset(themed.trailingText))
       themed.trailingText = theme_.bodyText;
+    if ((themed.status.showBattery || themed.status.clockText) &&
+        textStyleUnset(themed.status.battery.text))
+      themed.status.battery.text = theme_.smallText;
     if (themed.sidePadding < 0)
       themed.sidePadding = theme_.headerSidePadding;
     // Divider: the theme's headerUnderline sets the rule thickness when the
@@ -165,6 +181,10 @@ public:
         theme_.headerUnderline > 0) {
       themed.styles.normal.border = Paint::solid(Color::Black);
       themed.styles.normal.borderWidth = theme_.headerUnderline;
+    }
+    if (componentStyle()) {
+      componentStyle()->text.apply(themed.titleText);
+      componentStyle()->apply(themed.styles);
     }
     themed.minTouchSize = theme_.minTouchSize;
     ui::header(frame_, take(anchor, theme_.headerHeight), themed);
@@ -252,8 +272,9 @@ public:
     list(props, height, anchor);
   }
 
-  void list(const ListProps &props, int16_t height = 0,
-            LayoutAnchor anchor = LayoutAnchor::Top) {
+  // Resolve once before navigation/window allocation, using the same policy
+  // as drawing. Explicit row heights remain caller-supplied minimums.
+  ListProps resolveListProps(const ListProps &props) {
     ListProps themed = props;
     if (textStyleUnset(themed.labelText))
       themed.labelText = theme_.bodyText;
@@ -263,6 +284,13 @@ public:
       themed.valueText = theme_.smallText;
     if (textStyleUnset(themed.headerText))
       themed.headerText = theme_.smallText;
+    if (componentStyle()) {
+      componentStyle()->text.apply(themed.labelText);
+      componentStyle()->text.apply(themed.subtitleText);
+      componentStyle()->text.apply(themed.valueText);
+      componentStyle()->text.apply(themed.headerText);
+      themed.underlineFitsText = componentStyle()->markerWidth == MarkerWidth::Text;
+    }
     if (themed.rowStyles.unset()) {
       // Expand the theme's selection style over its base row styles; explicit
       // rowStyles or a caller-set marker win.
@@ -290,12 +318,34 @@ public:
       }
       themed.rowStyles = styles;
     }
-    if (themed.rowHeight <= 0)
-      themed.rowHeight = theme_.rowHeight;
-    if (themed.rowGap < 0)
+    if (componentStyle()) componentStyle()->apply(themed.rowStyles);
+    if (themed.rowHeight <= 0) {
+      if (themed.rowPaddingY < 0) {
+        const int16_t padding = device().hasTouch ? theme_.listTouchRowPaddingY : theme_.listRowPaddingY;
+        themed.rowPaddingY = padding < 0 ? 0 : padding;
+      }
+      themed.rowHeight = static_cast<int16_t>(target().lineHeight(themed.labelText.font) +
+                                              2 * themed.rowPaddingY);
+      if (themed.rowHeight < theme_.listMinRowHeight)
+        themed.rowHeight = theme_.listMinRowHeight;
+      if (device().hasTouch) {
+        const int16_t touchMin = device().minTouchSize > theme_.minTouchSize
+                                    ? device().minTouchSize : theme_.minTouchSize;
+        if (themed.rowHeight < touchMin)
+          themed.rowHeight = touchMin;
+        if (themed.rowHeight < theme_.listTouchMinRowHeight)
+          themed.rowHeight = theme_.listTouchMinRowHeight;
+      }
+    }
+    if (themed.rowGap < 0) {
       themed.rowGap = theme_.listRowGap;
+      if (device().hasTouch && themed.rowGap < theme_.listTouchRowGap)
+        themed.rowGap = theme_.listTouchRowGap;
+    }
     if (themed.rowRadius == 0)
       themed.rowRadius = theme_.listRowRadius;
+    if (themed.separatorPaint.kind == PaintKind::None)
+      themed.separatorPaint = theme_.listSeparator;
     if (themed.sidePadding < 0)
       themed.sidePadding = theme_.listSidePadding;
     if (themed.scrollIndicatorWidth < 0)
@@ -308,7 +358,26 @@ public:
     // the band's true edge.
     if (themed.rowInset < 0)
       themed.rowInset = theme_.listInset;
-    ui::list(frame_, height > 0 ? take(anchor, height) : content_, themed);
+    return themed;
+  }
+
+  void syncListViewport(ListNav &nav, ListProps &props, const int count,
+                        const int selectionOffset = 0) {
+    props = resolveListProps(props);
+    if (componentStyle() && componentStyle()->contentAlign != Align::Start && count > 0) {
+      const int height = listContentHeight(target(), frame_.assets(), content_, props);
+      content_ = componentStyle()->alignContent(content_, height);
+    }
+    nav.syncToProps(content_, props.rowHeight, props.rowGap, count, props, selectionOffset);
+  }
+
+  void list(const ListProps &props, int16_t height = 0,
+            LayoutAnchor anchor = LayoutAnchor::Top) {
+    const ListProps themed = resolveListProps(props);
+    Rect rect = height > 0 ? take(anchor, height) : content_;
+    if (componentStyle() && componentStyle()->contentAlign != Align::Start)
+      rect = componentStyle()->alignContent(rect, listContentHeight(target(), frame_.assets(), rect, themed));
+    ui::list(frame_, rect, themed);
   }
 
   void checkbox(const CheckboxProps &props,
@@ -466,16 +535,17 @@ public:
 
   void qwertyKeyboard(const QwertyKeyboardProps &props, int16_t height = 0,
                       LayoutAnchor anchor = LayoutAnchor::Top) {
-    ui::qwertyKeyboard(
-        frame_, take(anchor, height > 0 ? height : defaultKeyboardHeight()),
-        props);
+    const auto &layout = builtinKeyboardLayout(props.layout, props.shifted, props.symbols,
+                                                props.numberRow, props.langKey);
+    ui::qwertyKeyboard(frame_, takeKeyboard(anchor, height, layout.rowCount, props.padding,
+                                           props.rowGap, props.gap, props.minTouchSize), props);
   }
 
   void keyboard(const KeyboardProps &props, int16_t height = 0,
                 LayoutAnchor anchor = LayoutAnchor::Top) {
-    ui::keyboard(frame_,
-                 take(anchor, height > 0 ? height : defaultKeyboardHeight()),
-                 props);
+    if (!props.layout) return;
+    ui::keyboard(frame_, takeKeyboard(anchor, height, props.layout->rowCount, props.padding,
+                                     props.rowGap, props.gap, props.minTouchSize), props);
   }
 
   void bookCard(const BookCardProps &props, int16_t height = 0,
@@ -485,6 +555,34 @@ public:
                                   ? height
                                   : static_cast<int16_t>(theme_.rowHeight * 2)),
                  props);
+  }
+
+  void coverShelf(const CoverShelfProps &props, int16_t height = 252,
+                  LayoutAnchor anchor = LayoutAnchor::Top) {
+    CoverShelfProps themed = props;
+    if (textStyleUnset(themed.headingText)) themed.headingText = theme_.titleText;
+    if (textStyleUnset(themed.card.titleText)) themed.card.titleText = theme_.bodyText;
+    if (textStyleUnset(themed.card.authorText)) themed.card.authorText = theme_.bodyText;
+    ui::coverShelf(frame_, take(anchor, height), themed);
+  }
+
+  void catalogPage(const CatalogPageProps &props) {
+    ui::catalogPage(frame_, content_, props);
+  }
+
+  // Publication detail fills the body left by the app's header and footer.
+  void publicationPage(const PublicationPageProps &props) {
+    PublicationPageProps themed = props;
+    if (textStyleUnset(themed.book.titleText)) themed.book.titleText = theme_.titleText;
+    if (textStyleUnset(themed.book.detailText)) themed.book.detailText = theme_.bodyText;
+    if (textStyleUnset(themed.availability.headingText)) themed.availability.headingText = theme_.bodyText;
+    if (textStyleUnset(themed.availability.detailText)) themed.availability.detailText = theme_.bodyText;
+    if (textStyleUnset(themed.headingText)) themed.headingText = theme_.bodyText;
+    if (textStyleUnset(themed.bodyText)) themed.bodyText = theme_.bodyText;
+    if (textStyleUnset(themed.primary.text)) themed.primary.text = theme_.bodyText;
+    if (textStyleUnset(themed.secondary.text)) themed.secondary.text = theme_.bodyText;
+    if (textStyleUnset(themed.more.text)) themed.more.text = theme_.bodyText;
+    ui::publicationPage(frame_, content_, themed);
   }
 
   // Multi-line writing canvas. Fills the remaining body by default; pass a
@@ -617,28 +715,49 @@ public:
     ui::popup(frame_, centeredRect(bounds, panelSize), themed);
   }
 
+  // Theme substitution follows the slots optionDialog documents: a small
+  // caption, a prominent headline, a body line, and the option buttons. The
+  // measured height uses the SAME substituted styles as the draw, so a caller
+  // that leaves the styles to the theme gets a panel sized for the fonts it
+  // actually renders with.
   void dialog(const OptionDialogProps &props, int16_t width = 0) {
+    OptionDialogProps themed = props;
+    if (textStyleUnset(themed.titleText))
+      themed.titleText = theme_.smallText;
+    if (textStyleUnset(themed.headlineText))
+      themed.headlineText = theme_.titleText;
+    if (textStyleUnset(themed.messageText))
+      themed.messageText = theme_.bodyText;
+    if (textStyleUnset(themed.buttonText))
+      themed.buttonText = theme_.bodyText;
+    if (themed.styles.unset())
+      themed.styles = theme_.popup;
+    if (themed.buttonStyles.unset())
+      themed.buttonStyles = theme_.button;
     if (width <= 0)
       width = static_cast<int16_t>(frame_.safeRect().width * 4 / 5);
-    const int16_t height = optionDialogHeight(frame_.target(), props, width);
+    const int16_t height = optionDialogHeight(frame_.target(), themed, width);
     ui::optionDialog(
-        frame_, centeredRect(frame_.safeRect(), Size{width, height}), props);
+        frame_, centeredRect(frame_.safeRect(), Size{width, height}), themed);
   }
 
 private:
-  int16_t defaultKeyboardHeight() const {
+  Rect takeKeyboard(LayoutAnchor anchor, int16_t height, uint8_t rows,
+                    Insets padding, int16_t rowGap, int16_t keyGap, int16_t minTouchSize) {
     const Rect safe = frame_.safeRect();
-    int16_t height =
-        static_cast<int16_t>(theme_.rowHeight * 3 + theme_.spaceSm * 3);
-    const int16_t widthBased = static_cast<int16_t>(safe.width / 4);
-    if (widthBased > height)
-      height = widthBased;
-    const int16_t maxHeight = static_cast<int16_t>(safe.height * 45 / 100);
-    if (height > maxHeight)
-      height = maxHeight;
-    if (height > safe.height)
-      height = safe.height;
-    return height < 1 ? 1 : height;
+    if (height <= 0) {
+      height = keyboardPreferredHeight(safe.width, rows, padding, rowGap, minTouchSize, keyGap);
+      // Leave space for the entry field even on short screens. A five-row
+      // keyboard at the normal 56px height still fits on a 480px display.
+      const int16_t maxHeight = static_cast<int16_t>(static_cast<int32_t>(safe.height) * 2 / 3);
+      if (height > maxHeight) height = maxHeight;
+    }
+    Rect rect = take(anchor, height);
+    // Text content margins should not squeeze the keyboard. Honor hardware
+    // safe areas, while using the full horizontal band reserved by take().
+    rect.x = safe.x;
+    rect.width = safe.width;
+    return rect;
   }
 
   static Rect insetClamped(Rect rect, Insets margin) {
@@ -660,8 +779,21 @@ private:
     return margin > safeInset ? static_cast<int16_t>(margin - safeInset) : 0;
   }
 
+  // The style set by setComponentStyle(); a constant nullptr when compiled out, so every override
+  // path folds away.
+  const ComponentStyle* componentStyle() const {
+#if FREEINK_UI_COMPONENT_STYLE
+    return componentStyle_;
+#else
+    return nullptr;
+#endif
+  }
+
   FrameType &frame_;
   const ThemeTokens &theme_;
+#if FREEINK_UI_COMPONENT_STYLE
+  const ComponentStyle* componentStyle_ = nullptr;
+#endif
   Rect content_{};
 };
 
@@ -860,6 +992,11 @@ public:
   // True while a held touch sits on an interactive element (the routing marks
   // it active and it renders with its StateActive style).
   bool touchActive() const { return interactions_.activeIndex() >= 0; }
+
+  bool hitPublished(int16_t x, int16_t y, ActionId action,
+                    Interaction &out) const {
+    return interactions_.hitPublished(x, y, action, out);
+  }
 
   // Drop a pending tap flash. Call from handlers that navigate to a different
   // screen: the tapped element no longer exists there, and an element on the

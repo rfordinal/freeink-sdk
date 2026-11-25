@@ -61,6 +61,10 @@ class DisplayTarget final : public DrawTarget {
   // the app assigns; they index these slots. All default to the bundled font.
   static constexpr FontId FONT_SLOTS = 8;
 
+  Rect clipRect() const override { return clip_; }
+  bool setClipRect(Rect rect) override { clip_ = rect; return true; }
+
+
   // Panel-native dimensions + explicit logical orientation.
   DisplayTarget(uint8_t* framebuffer, int16_t panelWidth, int16_t panelHeight, int16_t panelWidthBytes,
                 Orientation orientation)
@@ -93,12 +97,31 @@ class DisplayTarget final : public DrawTarget {
   // Fallback for codepoints missing from the bitmap fonts (nullptr = off).
   void setGlyphFallback(RuntimeGlyphSource* source) { fallback_ = source; }
 
+  // Draw one slot entirely from a runtime source (a TTF, say — see
+  // FreeInkUIRasterFont.h) at a fixed pixel size, with the given line metrics.
+  // The source must outlive the target. setFont(slot, BitmapFont) undoes it.
+  void setFont(const FontId slot, RuntimeGlyphSource& source, const uint16_t pixelSize, const int16_t lineHeight,
+               const int16_t ascent) {
+    if (slot >= FONT_SLOTS) return;
+    // A BitmapFont with no glyphs carries the metrics; every codepoint then
+    // reaches the slot's source.
+    BitmapFont& f = runtimeFonts_[slot];
+    f = BitmapFont{nullptr, nullptr, 1, 0, static_cast<uint8_t>(lineHeight), static_cast<uint8_t>(ascent),
+                   static_cast<uint8_t>(pixelSize), static_cast<uint8_t>(lineHeight), 1};
+    runtimeSources_[slot] = &source;
+    runtimeSizes_[slot] = pixelSize;
+    fonts_[slot] = &f;
+  }
+
   // Point one slot, or every slot, at a different BitmapFont.
   void setFont(const FontId slot, const BitmapFont& font) {
-    if (slot < FONT_SLOTS) fonts_[slot] = &font;
+    if (slot < FONT_SLOTS) {
+      fonts_[slot] = &font;
+      runtimeSources_[slot] = nullptr;
+    }
   }
   void setFont(const BitmapFont& font) {
-    for (FontId i = 0; i < FONT_SLOTS; ++i) fonts_[i] = &font;
+    for (FontId i = 0; i < FONT_SLOTS; ++i) setFont(i, font);
   }
 
   // Convenience: a DeviceContext sized to this target's LOGICAL frame, carrying
@@ -213,6 +236,16 @@ class DisplayTarget final : public DrawTarget {
                                ? invertedColor(style.color)
                                : style.color;
     const bool ink = inkColor == Color::Black;
+    if (style.align == TextAlign::Center && style.rotation == Rotation::None &&
+        text[0] >= '0' && text[0] <= '9' && text[1] == '\0') {
+      const FontGlyph* glyph = glyphFor(f, static_cast<uint32_t>(text[0]));
+      if (glyph && glyph->width > 0 && glyph->height > 0 && glyph->width <= rect.width && glyph->height <= rect.height) {
+        const int16_t x = static_cast<int16_t>(rect.x + (rect.width - glyph->width) / 2 - glyph->xOffset);
+        const int16_t baseline = static_cast<int16_t>(rect.y + (rect.height - glyph->height) / 2 - glyph->yOffset);
+        drawGlyph(f, *glyph, x, baseline, ink, inkColor);
+        return;
+      }
+    }
     layoutText(*this, rect, text, style, [&](const char* line, const Rect lineRect) {
       drawRun(f, line, lineRect.x, static_cast<int16_t>(lineRect.y + f.ascent), ink, inkColor);
     });
@@ -232,6 +265,7 @@ class DisplayTarget final : public DrawTarget {
   }
 
  private:
+  Rect clip_{0, 0, 32767, 32767};
   uint8_t* fb_;
   int16_t pw_;   // panel-native width (px)
   int16_t ph_;   // panel-native height (px)
@@ -241,6 +275,24 @@ class DisplayTarget final : public DrawTarget {
   int16_t h_;  // logical height
   const BitmapFont* fonts_[FONT_SLOTS];
   RuntimeGlyphSource* fallback_ = nullptr;
+  // Slots drawn from a runtime source (setFont(slot, source, ...)).
+  BitmapFont runtimeFonts_[FONT_SLOTS]{};
+  RuntimeGlyphSource* runtimeSources_[FONT_SLOTS]{};
+  uint16_t runtimeSizes_[FONT_SLOTS]{};
+
+  // The source for codepoints `f` lacks, and the pixel size to ask it for:
+  // the slot's own for a runtime slot, else the shared fallback.
+  RuntimeGlyphSource* sourceFor(const BitmapFont& f, uint16_t& pixelSize) const {
+    if (&f >= runtimeFonts_ && &f < runtimeFonts_ + FONT_SLOTS) {
+      const size_t slot = static_cast<size_t>(&f - runtimeFonts_);
+      if (runtimeSources_[slot] != nullptr) {
+        pixelSize = runtimeSizes_[slot];
+        return runtimeSources_[slot];
+      }
+    }
+    pixelSize = f.yAdvance;
+    return fallback_;
+  }
 
   static bool isPortrait(const Orientation o) {
     return o == Orientation::Portrait || o == Orientation::PortraitInverted;
@@ -272,7 +324,7 @@ class DisplayTarget final : public DrawTarget {
   }
 
   void plot(const int16_t x, const int16_t y, const Color color) {
-    if (!fb_) return;
+    if (!fb_ || !clip_.contains(x, y)) return;
     if (x < 0 || y < 0 || x >= w_ || y >= h_ || color == Color::Transparent) return;
     // Rotate the logical pixel into panel-native space. Transforms match
     // CrossPoint's GfxRenderer::rotateCoordinates so "up" agrees across stacks.
@@ -345,7 +397,10 @@ class DisplayTarget final : public DrawTarget {
       cp = ((c0 & 0x0Fu) << 12) | ((static_cast<uint8_t>(s[1]) & 0x3Fu) << 6) | (static_cast<uint8_t>(s[2]) & 0x3Fu);
       return 3;
     }
-    if ((c0 & 0xF8) == 0xF0) { cp = '?'; return 4; }
+    if ((c0 & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
+      cp = '?';
+      return 4;
+    }
     cp = c0;
     return 1;
   }
@@ -387,8 +442,9 @@ class DisplayTarget final : public DrawTarget {
     }
     const FontGlyph* g = glyphFor(f, cp);
     if (g) return g->xAdvance;
-    if (fallback_ != nullptr) {
-      const int16_t adv = fallback_->advance(cp, f.yAdvance);
+    uint16_t size;
+    if (RuntimeGlyphSource* source = sourceFor(f, size)) {
+      const int16_t adv = source->advance(cp, size);
       if (adv > 0) return adv;
     }
     return missingGlyphAdvance(f);
@@ -444,9 +500,9 @@ class DisplayTarget final : public DrawTarget {
       }
       const FontGlyph* g = glyphFor(f, cp);
       if (g) { drawGlyph(f, *g, penX, baseline, ink, inkColor); penX = static_cast<int16_t>(penX + g->xAdvance); }
-      else if (fallback_ != nullptr) {
+      else if (uint16_t size; RuntimeGlyphSource* source = sourceFor(f, size)) {
         RuntimeGlyphSource::Glyph rg;
-        if (fallback_->glyph(cp, f.yAdvance, &rg)) {
+        if (source->glyph(cp, size, &rg)) {
           const Color color = (inkColor == Color::Black || inkColor == Color::White)
                             ? (ink ? Color::Black : Color::White)
                             : inkColor;
